@@ -1,0 +1,648 @@
+---
+title: "WBS"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+RQ 3: We will conduct single-case change point analyses for participants in which significant changes in mean level or slope were detected by the PDT and/or ITSA (RQ2). Data will be analysed with Wild Binary Segmentation (WBS) [62]. 
+> WBS has no assumptions. 
+> It tests for change points by splitting the longitudinal observations into random intervals. 
+> Per individual, the analysis gives insight into the exact moment of change (both level and slope) for each outcome.  
+
+
+This will provide us with information on which Booster intervention stages or elements were relevant to changes in the study outcomes across individuals.
+strenghts
+- random intervals - can detect close togehter change points
+- does not require choice of window parameter
+- easy and not computational complex
+
+sharma:  DOI: 10.1007/s40974-016-0011-1
+The R package, WBS, is available with two methods, Standard Binary Segmentation (SBS) and Wild Binary Segmentation (WBS)
+Baranowski R, Fryzlewicz P (2014) wbs: wild binary segmentation for multiple change-point detection. R package version 1.1  
+
+wbs stopping criteria (2 options)
+1. based on treshold
+2. strengthened Schwarz information criterion (sSIC)
+--> avoids overdetecting changepoints
+
+https://www.rdocumentation.org/packages/wbs/versions/1.4/topics/wbs
+--> input = numerical vector, ordered in time. assumes equidistance
+--> cannot handle missing data, so need to be umputed
+
+# load data and packages 
+```{r}
+rm(list = objects())
+
+library(dplyr)
+#library(readxl)
+library(tidyr)
+library(data.table)
+library(wbs)
+library(openxlsx)
+library(ggplot2)
+
+DataDir<-""
+OutDir<-""
+
+
+# Terugblik data (imputed version)
+tb<-fread(
+  paste0(DataDir,"2026-04-01_TerugblikIMP_export_260331.csv"),
+  sep=";", 
+  fill=TRUE)
+tb<-as.data.frame(tb)
+
+```
+
+# Changepoint analysis 
+M     number of random intervals, recommendation M= 5000 (higher, more comp power needed). M = 0 reduces WBS to BS
+C     treshold constant. Should be selected based on simulation. If not wanting to simulate; advice is to use the sSIC
+> Computes the residual variance of the fitted piecewise‑constant model.
+> Computes a penalty that increases with the number of changepoints.
+> Picks the model that gives the lowest sSIC
+  
+  https://www.rdocumentation.org/packages/wbs/versions/1.4/topics/changepoints
+  
+result :
+'s' and 'e' denote start- end points of the intervals in which change-points candidates 'cpt' have been found; 
+           -->  for each possible split position (n-1) , it provides the strongest interval-based CUSUM statisticm and corresponding s & e (interval)
+           --> the split seems to be after the cpt 
+column 'CUSUM' contains corresponding value of CUSUM statistic; 
+'min.th' is the smallest threshold value for which given change-point candidate would be not added to the set of estimated change-points; 
+the last column is the scale at which the change-point has been found
+        --> seems to be an approximate ordining. Lower; is stronger change point, earlier found. 
+# plot changepoints
+```{r}
+# Original data
+y <- as.numeric(B04$fse_imp)
+df_ts <- data.frame(t = seq_along(y), y = y)
+# Extract IC-based CPs 
+cp <- unlist(ch.B04.fse$cpt.ic, use.names = FALSE)  # the CPs 
+cp <- sort(unique(as.integer(cp)))
+
+# data.frame with results
+res_df <- as.data.frame(result.B04)
+
+# Keep only the rows for the detected CPs; compute strength = |CUSUM|
+hits <- res_df %>%
+  filter(cpt %in% cp) %>%
+  mutate(strength = abs(CUSUM))
+
+hits <- hits %>%
+  arrange(desc(strength))
+
+# 4) Build a label that appears **in the legend**
+#    Example: "cp=35  [s=1, e=35]  |CUSUM|=38.98"
+hits$label <- with(hits, sprintf("%d [%d;%d], |CUSUM|=%.0f", cpt, s, e, strength))
+hits$label <- factor(hits$label, levels = hits$label)  # preserve order in legend
+
+# 5) Plot ONLY the series + dashed CP lines; legend shows interval and |CUSUM|
+p <- ggplot(df_ts, aes(t, y)) +
+  geom_line(color = "grey20") +
+  geom_vline(
+    data = hits,
+    aes(xintercept = cpt, color = label),
+    linetype = 1, linewidth = 1, alpha = 1
+  ) +
+   # intervals [s,e] as light outlines (dashed)
+  geom_rect(
+    data = hits,
+    aes(xmin = s, xmax = e, ymin = -Inf, ymax = Inf, color = label),
+    inherit.aes = FALSE,
+    fill = NA, linewidth = 0.5, alpha = 0.5, linetype = 2
+  ) + 
+  
+  labs(
+    title = "Original data with WBS changepoints",
+    x = "Index", y = "Value", color = "CP [interval], |CUSUM|"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 9)
+  ) +
+  guides(color = guide_legend(ncol = 3, override.aes = list(linetype = 1, linewidth = 1.2)))
+
+print(p)
+
+
+table(tb$sent_date == tb$T2_Inzichtsgesprek_date) 
+```
+
+# FSE 
+```{r}
+studienummers    <- unique(tb$Studienummer)
+cp_results_list  <- list()
+
+for (id in studienummers) {
+  
+  cat("Processing:", id, "\n")
+  
+  dat <- tb[tb$Studienummer == id, ]
+  y   <- as.numeric(dat$fse_imp)
+  
+
+  # ── 1. WBS ──────────────────────────────────────────────────────────────────
+  object <- tryCatch(
+    wbs(y, M = 5000, rand.intervals = TRUE, integrated = TRUE),
+    error = function(e) { message("  WBS failed: ", e$message); NULL }
+  )
+  if (is.null(object)) next
+  
+  # ── 2. Changepoints ─────────────────────────────────────────────────────────
+  ch <- tryCatch(
+    changepoints(object, th = NULL, th.const = 1.3, Kmax = 2, penalty = "ssic.penalty"),
+    error = function(e) { message("  changepoints() failed: ", e$message); NULL }
+  )
+  if (is.null(ch)) next
+  
+  cp <- sort(unique(as.integer(unlist(ch$cpt.ic, use.names = FALSE))))
+  
+  # ── 3. Vertical line positions ──────────────────────────────────────────────
+  # T1_StartMeet: first row where sent_date matches T1_StartMeet_date
+  t1_idx <- which(dat$sent_date == dat$T1_StartMeet_date)[1]
+  
+  # Phase B: first row where phase_FSE == "B"
+  phase_B_idx <- which(dat$phase_FSE == "B")[1]
+  
+
+  
+  # ── 4. Build hits df ────────────────────────────────────────────────────────
+  res_df <- as.data.frame(object$res)
+  
+  if (length(cp) > 0 && nrow(res_df) > 0) {
+    hits <- res_df %>%
+      filter(cpt %in% cp) %>%
+      mutate(strength = abs(CUSUM)) %>%
+      arrange(desc(strength))
+    hits$label <- with(hits, sprintf("%d [%d;%d], |CUSUM|=%.0f", cpt, s, e, strength))
+    hits$label <- factor(hits$label, levels = hits$label)
+  } else {
+    hits <- data.frame()
+  }
+  
+  # ── 5. Plot ─────────────────────────────────────────────────────────────────
+  dfts <- data.frame(t = seq_along(y), y = y)
+  
+  p <- ggplot(dfts, aes(t, y)) +
+    geom_line(color = "grey20")
+  
+  # Phase B dotted line (black)
+  if (!is.na(phase_B_idx)) {
+    p <- p + geom_vline(xintercept = phase_B_idx,
+                        linetype = "dotted", color = "black", linewidth = 1) +
+      annotate("text", x = phase_B_idx, y = Inf,
+               label = "T2", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "black")
+  }
+  
+  # T1_StartMeet dotted line (darkgrey)
+  if (!is.na(t1_idx)) {
+    p <- p + geom_vline(xintercept = t1_idx,
+                        linetype = "dotted", color = "darkgrey", linewidth = 1) +
+      annotate("text", x = t1_idx, y = Inf,
+               label = "T1", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "darkgrey")
+  }
+  
+  # CP lines + interval rectangles
+  if (nrow(hits) > 0) {
+    p <- p +
+      geom_vline(data = hits, aes(xintercept = cpt, color = label),
+                 linetype = 1, linewidth = 1) +
+      geom_rect(data = hits,
+                aes(xmin = s, xmax = e, ymin = -Inf, ymax = Inf, color = label),
+                inherit.aes = FALSE, fill = NA, linewidth = 0.5, linetype = 2)
+  }
+  
+  p <- p +
+    labs(title = paste(id, "– WBS changepoints (fse_imp)"),
+         x = "Time index", y = "fse_imp",
+         color = "CP [interval], |CUSUM|") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position  = "bottom",
+          legend.title     = element_text(size = 10),
+          legend.text      = element_text(size = 9)) +
+    guides(color = guide_legend(ncol = 3,
+                                override.aes = list(linetype = 1, linewidth = 1.2)))
+  
+  plot_path <- file.path(OutDir, paste0(id, "_WBS_fse_imp.png"))
+  ggsave(plot_path, plot = p, width = 10, height = 5)
+  cat("  Plot saved:", plot_path, "\n")
+  
+  # ── 6. Collect results ───────────────────────────────────────────────────────
+  if (length(cp) > 0 && nrow(hits) > 0) {
+    cp_df <- hits %>%
+      select(cpt, s, e, CUSUM, strength) %>%
+      mutate(
+        Studienummer   = id,
+        dep_var        = "fse_imp",
+        n_obs          = length(y),
+        n_cp           = length(cp),
+        penalty        = "ssic.penalty",
+        th.const       = 1.3,
+        Kmax           = 3,
+        time_phase_B   = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx)),
+        time_T1_start  = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx))
+      )
+  } else {
+    cp_df <- data.frame(
+      cpt = NA, s = NA, e = NA, CUSUM = NA, strength = NA,
+      Studienummer  = id, dep_var = "fse_imp",
+      n_obs         = length(y), n_cp = 0,
+      penalty       = "ssic.penalty", th.const = 1.3, Kmax = 2,
+      time_phase_B  = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx)),
+      time_T1_start = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx))
+    )
+  }
+  
+  cp_results_list[[id]] <- cp_df
+}
+
+# ── 7. Combine & save as Excel ───────────────────────────────────────────────
+cp_results_table <- do.call(rbind, cp_results_list)
+rownames(cp_results_table) <- NULL
+
+# Reorder columns for readability
+cp_results_table <- cp_results_table %>%
+  select(Studienummer, dep_var, n_obs, n_cp,
+         cpt, s, e, CUSUM, strength,
+         time_phase_B, time_T1_start,
+         penalty, th.const, Kmax)
+
+wb <- createWorkbook()
+addWorksheet(wb, "WBS_results")
+
+# Header style
+hs <- createStyle(fontName = "Arial", fontSize = 11, textDecoration = "bold",
+                  fgFill = "#D9E1F2", halign = "center",
+                  border = "Bottom", borderStyle = "medium")
+
+writeData(wb, "WBS_results", cp_results_table, headerStyle = hs)
+
+# Body style
+body_style <- createStyle(fontName = "Arial", fontSize = 10)
+addStyle(wb, "WBS_results", body_style,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = 1:ncol(cp_results_table),
+         gridExpand = TRUE)
+
+# Highlight the two time columns
+highlight <- createStyle(fontName = "Arial", fontSize = 10, fgFill = "#FFF2CC")
+addStyle(wb, "WBS_results", highlight,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = which(names(cp_results_table) %in% c("time_phase_B", "time_T1_start")),
+         gridExpand = TRUE)
+
+setColWidths(wb, "WBS_results", cols = 1:ncol(cp_results_table), widths = "auto")
+
+xlsx_path <- file.path(OutDir, "2026-04-01_WBS_fse_imp_changepoints.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+cat("\nResults saved to:", xlsx_path, "\n")
+```
+
+# Health 
+```{r}
+#studienummers    <- unique(tb$Studienummer)
+cp_results_list  <- list()
+
+for (id in studienummers) {
+  
+  cat("Processing:", id, "\n")
+  
+  dat <- tb[tb$Studienummer == id, ]
+  y   <- as.numeric(dat$health_imp)
+  
+
+  # ── 1. WBS ──────────────────────────────────────────────────────────────────
+  object <- tryCatch(
+    wbs(y, M = 5000, rand.intervals = TRUE, integrated = TRUE),
+    error = function(e) { message("  WBS failed: ", e$message); NULL }
+  )
+  if (is.null(object)) next
+  
+  # ── 2. Changepoints ─────────────────────────────────────────────────────────
+  ch <- tryCatch(
+    changepoints(object, th = NULL, th.const = 1.3, Kmax = 2, penalty = "ssic.penalty"),
+    error = function(e) { message("  changepoints() failed: ", e$message); NULL }
+  )
+  if (is.null(ch)) next
+  
+  cp <- sort(unique(as.integer(unlist(ch$cpt.ic, use.names = FALSE))))
+  
+  # ── 3. Vertical line positions ──────────────────────────────────────────────
+  # T1_StartMeet: first row where sent_date matches T1_StartMeet_date
+  t1_idx <- which(dat$sent_date == dat$T1_StartMeet_date)[1]
+  
+  # Phase B: first row where phase_health == "B"
+  phase_B_idx <- which(dat$phase_satisf_health == "B")[1]
+  
+
+  
+  # ── 4. Build hits df ────────────────────────────────────────────────────────
+  res_df <- as.data.frame(object$res)
+  
+  if (length(cp) > 0 && nrow(res_df) > 0) {
+    hits <- res_df %>%
+      filter(cpt %in% cp) %>%
+      mutate(strength = abs(CUSUM)) %>%
+      arrange(desc(strength))
+    hits$label <- with(hits, sprintf("%d [%d;%d], |CUSUM|=%.0f", cpt, s, e, strength))
+    hits$label <- factor(hits$label, levels = hits$label)
+  } else {
+    hits <- data.frame()
+  }
+  
+  # ── 5. Plot ─────────────────────────────────────────────────────────────────
+  dfts <- data.frame(t = seq_along(y), y = y)
+  
+  p <- ggplot(dfts, aes(t, y)) +
+    geom_line(color = "grey20")
+  
+  # Phase B dotted line (black)
+  if (!is.na(phase_B_idx)) {
+    p <- p + geom_vline(xintercept = phase_B_idx,
+                        linetype = "dotted", color = "black", linewidth = 1) +
+      annotate("text", x = phase_B_idx, y = Inf,
+               label = "T2", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "black")
+  }
+  
+  # T1_StartMeet dotted line (darkgrey)
+  if (!is.na(t1_idx)) {
+    p <- p + geom_vline(xintercept = t1_idx,
+                        linetype = "dotted", color = "darkgrey", linewidth = 1) +
+      annotate("text", x = t1_idx, y = Inf,
+               label = "T1", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "darkgrey")
+  }
+  
+  # CP lines + interval rectangles
+  if (nrow(hits) > 0) {
+    p <- p +
+      geom_vline(data = hits, aes(xintercept = cpt, color = label),
+                 linetype = 1, linewidth = 1) +
+      geom_rect(data = hits,
+                aes(xmin = s, xmax = e, ymin = -Inf, ymax = Inf, color = label),
+                inherit.aes = FALSE, fill = NA, linewidth = 0.5, linetype = 2)
+  }
+  
+  p <- p +
+    labs(title = paste(id, "– WBS changepoints (health_imp)"),
+         x = "Time index", y = "health_imp",
+         color = "CP [interval], |CUSUM|") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position  = "bottom",
+          legend.title     = element_text(size = 10),
+          legend.text      = element_text(size = 9)) +
+    guides(color = guide_legend(ncol = 3,
+                                override.aes = list(linetype = 1, linewidth = 1.2)))
+  
+  plot_path <- file.path(OutDir, paste0(id, "_WBS_health_imp.png"))
+  ggsave(plot_path, plot = p, width = 10, height = 5)
+  cat("  Plot saved:", plot_path, "\n")
+  
+  # ── 6. Collect results ───────────────────────────────────────────────────────
+  if (length(cp) > 0 && nrow(hits) > 0) {
+    cp_df <- hits %>%
+      select(cpt, s, e, CUSUM, strength) %>%
+      mutate(
+        Studienummer   = id,
+        dep_var        = "health_imp",
+        n_obs          = length(y),
+        n_cp           = length(cp),
+        penalty        = "ssic.penalty",
+        th.const       = 1.3,
+        Kmax           = 3,
+        T1  = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx)),
+        T2   = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx))
+      )
+  } else {
+    cp_df <- data.frame(
+      cpt = NA, s = NA, e = NA, CUSUM = NA, strength = NA,
+      Studienummer  = id, dep_var = "health_imp",
+      n_obs         = length(y), n_cp = 0,
+      penalty       = "ssic.penalty", th.const = 1.3, Kmax = 2,
+     T1  = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx)),
+       T2  = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx))
+      
+    )
+  }
+  
+  cp_results_list[[id]] <- cp_df
+}
+
+# ── 7. Combine & save as Excel ───────────────────────────────────────────────
+cp_results_table <- do.call(rbind, cp_results_list)
+rownames(cp_results_table) <- NULL
+
+# Reorder columns for readability
+cp_results_table <- cp_results_table %>%
+  select(Studienummer, dep_var, n_obs, n_cp,
+         cpt, s, e, CUSUM, strength,
+         T1, T2,
+         penalty, th.const, Kmax)
+
+wb <- createWorkbook()
+addWorksheet(wb, "WBS_results")
+
+# Header style
+hs <- createStyle(fontName = "Arial", fontSize = 11, textDecoration = "bold",
+                  fgFill = "#D9E1F2", halign = "center",
+                  border = "Bottom", borderStyle = "medium")
+
+writeData(wb, "WBS_results", cp_results_table, headerStyle = hs)
+
+# Body style
+body_style <- createStyle(fontName = "Arial", fontSize = 10)
+addStyle(wb, "WBS_results", body_style,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = 1:ncol(cp_results_table),
+         gridExpand = TRUE)
+
+# Highlight the two time columns
+highlight <- createStyle(fontName = "Arial", fontSize = 10, fgFill = "#FFF2CC")
+addStyle(wb, "WBS_results", highlight,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = which(names(cp_results_table) %in% c("time_phase_B", "time_T1_start")),
+         gridExpand = TRUE)
+
+setColWidths(wb, "WBS_results", cols = 1:ncol(cp_results_table), widths = "auto")
+
+xlsx_path <- file.path(OutDir, "2026-04-01_WBS_health_imp_changepoints.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+cat("\nResults saved to:", xlsx_path, "\n")
+```
+# satisfaction 
+```{r}
+#studienummers    <- unique(tb$Studienummer)
+cp_results_list  <- list()
+
+for (id in studienummers) {
+  
+  cat("Processing:", id, "\n")
+  
+  dat <- tb[tb$Studienummer == id, ]
+  y   <- as.numeric(dat$satisfaction_imp)
+  
+
+  # ── 1. WBS ──────────────────────────────────────────────────────────────────
+  object <- tryCatch(
+    wbs(y, M = 5000, rand.intervals = TRUE, integrated = TRUE),
+    error = function(e) { message("  WBS failed: ", e$message); NULL }
+  )
+  if (is.null(object)) next
+  
+  # ── 2. Changepoints ─────────────────────────────────────────────────────────
+  ch <- tryCatch(
+    changepoints(object, th = NULL, th.const = 1.3, Kmax = 2, penalty = "ssic.penalty"),
+    error = function(e) { message("  changepoints() failed: ", e$message); NULL }
+  )
+  if (is.null(ch)) next
+  
+  cp <- sort(unique(as.integer(unlist(ch$cpt.ic, use.names = FALSE))))
+  
+  # ── 3. Vertical line positions ──────────────────────────────────────────────
+  # T1_StartMeet: first row where sent_date matches T1_StartMeet_date
+  t1_idx <- which(dat$sent_date == dat$T1_StartMeet_date)[1]
+  
+  # Phase B: first row where phase_health == "B"
+  phase_B_idx <- which(dat$phase_satisf_health == "B")[1]
+  
+
+  
+  # ── 4. Build hits df ────────────────────────────────────────────────────────
+  res_df <- as.data.frame(object$res)
+  
+  if (length(cp) > 0 && nrow(res_df) > 0) {
+    hits <- res_df %>%
+      filter(cpt %in% cp) %>%
+      mutate(strength = abs(CUSUM)) %>%
+      arrange(desc(strength))
+    hits$label <- with(hits, sprintf("%d [%d;%d], |CUSUM|=%.0f", cpt, s, e, strength))
+    hits$label <- factor(hits$label, levels = hits$label)
+  } else {
+    hits <- data.frame()
+  }
+  
+  # ── 5. Plot ─────────────────────────────────────────────────────────────────
+  dfts <- data.frame(t = seq_along(y), y = y)
+  
+  p <- ggplot(dfts, aes(t, y)) +
+    geom_line(color = "grey20")
+  
+  # Phase B dotted line (black)
+  if (!is.na(phase_B_idx)) {
+    p <- p + geom_vline(xintercept = phase_B_idx,
+                        linetype = "dotted", color = "black", linewidth = 1) +
+      annotate("text", x = phase_B_idx, y = Inf,
+               label = "T2", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "black")
+  }
+  
+  # T1_StartMeet dotted line (darkgrey)
+  if (!is.na(t1_idx)) {
+    p <- p + geom_vline(xintercept = t1_idx,
+                        linetype = "dotted", color = "darkgrey", linewidth = 1) +
+      annotate("text", x = t1_idx, y = Inf,
+               label = "T1", vjust = 1.5, hjust = -0.1,
+               size = 3, color = "darkgrey")
+  }
+  
+  # CP lines + interval rectangles
+  if (nrow(hits) > 0) {
+    p <- p +
+      geom_vline(data = hits, aes(xintercept = cpt, color = label),
+                 linetype = 1, linewidth = 1) +
+      geom_rect(data = hits,
+                aes(xmin = s, xmax = e, ymin = -Inf, ymax = Inf, color = label),
+                inherit.aes = FALSE, fill = NA, linewidth = 0.5, linetype = 2)
+  }
+  
+  p <- p +
+    labs(title = paste(id, "– WBS changepoints (satisfaction_imp)"),
+         x = "Time index", y = "satisfaction_imp",
+         color = "CP [interval], |CUSUM|") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position  = "bottom",
+          legend.title     = element_text(size = 10),
+          legend.text      = element_text(size = 9)) +
+    guides(color = guide_legend(ncol = 3,
+                                override.aes = list(linetype = 1, linewidth = 1.2)))
+  
+  plot_path <- file.path(OutDir, paste0(id, "_WBS_satisfaction_imp.png"))
+  ggsave(plot_path, plot = p, width = 10, height = 5)
+  cat("  Plot saved:", plot_path, "\n")
+  
+  # ── 6. Collect results ───────────────────────────────────────────────────────
+  if (length(cp) > 0 && nrow(hits) > 0) {
+    cp_df <- hits %>%
+      select(cpt, s, e, CUSUM, strength) %>%
+      mutate(
+        Studienummer   = id,
+        dep_var        = "satisfaction_imp",
+        n_obs          = length(y),
+        n_cp           = length(cp),
+        penalty        = "ssic.penalty",
+        th.const       = 1.3,
+        Kmax           = 3,
+        T1  = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx)),
+        T2   = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx))
+      )
+  } else {
+    cp_df <- data.frame(
+      cpt = NA, s = NA, e = NA, CUSUM = NA, strength = NA,
+      Studienummer  = id, dep_var = "satisfaction_imp",
+      n_obs         = length(y), n_cp = 0,
+      penalty       = "ssic.penalty", th.const = 1.3, Kmax = 2,
+     T1  = ifelse(is.na(t1_idx),      NA_integer_, as.integer(t1_idx)),
+       T2  = ifelse(is.na(phase_B_idx), NA_integer_, as.integer(phase_B_idx))
+      
+    )
+  }
+  
+  cp_results_list[[id]] <- cp_df
+}
+
+# ── 7. Combine & save as Excel ───────────────────────────────────────────────
+cp_results_table <- do.call(rbind, cp_results_list)
+rownames(cp_results_table) <- NULL
+
+# Reorder columns for readability
+cp_results_table <- cp_results_table %>%
+  select(Studienummer, dep_var, n_obs, n_cp,
+         cpt, s, e, CUSUM, strength,
+         T1, T2,
+         penalty, th.const, Kmax)
+
+wb <- createWorkbook()
+addWorksheet(wb, "WBS_results")
+
+# Header style
+hs <- createStyle(fontName = "Arial", fontSize = 11, textDecoration = "bold",
+                  fgFill = "#D9E1F2", halign = "center",
+                  border = "Bottom", borderStyle = "medium")
+
+writeData(wb, "WBS_results", cp_results_table, headerStyle = hs)
+
+# Body style
+body_style <- createStyle(fontName = "Arial", fontSize = 10)
+addStyle(wb, "WBS_results", body_style,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = 1:ncol(cp_results_table),
+         gridExpand = TRUE)
+
+# Highlight the two time columns
+highlight <- createStyle(fontName = "Arial", fontSize = 10, fgFill = "#FFF2CC")
+addStyle(wb, "WBS_results", highlight,
+         rows = 2:(nrow(cp_results_table) + 1),
+         cols = which(names(cp_results_table) %in% c("time_phase_B", "time_T1_start")),
+         gridExpand = TRUE)
+
+setColWidths(wb, "WBS_results", cols = 1:ncol(cp_results_table), widths = "auto")
+
+xlsx_path <- file.path(OutDir, "2026-04-01_WBS_satisfaction_imp_changepoints.xlsx")
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+cat("\nResults saved to:", xlsx_path, "\n")
+```

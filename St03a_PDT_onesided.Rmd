@@ -1,0 +1,406 @@
+---
+title: "PDT"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+PDT  - one sided (imputed data )
+create participant specific  outcomes
+> Improvements in fatigue and participation are expected four weeks later, 
+> with life satisfaction and perceived health improving at six weeks post-Insight Conversation
+
+
+List with the permutation distancing test results: 
+ar1 = vector of computed ar1 values per distancing step (0,1,2, etc), 
+p_box = vector of computed box-test p-values per distancing step, 
+statistic_box = vector of box-test statistics per distancing step, 
+observed_test_statistic = computed overall AB test statistic (before distancing), 
+effect_size_overall = computed overall effect size (before distancing), 
+p = vector of computed permutation test p-values per distancing step, 
+effect_size vector of computed permutation test effect-sizes per distancing step,
+p_fitted = vector of lm-fitted line p-values through p_box, 
+k_max = k_max setting in call or computed based on the number of observations,
+k_selected_based_on_Box_test = selected k values, 
+p_selected_based_on_Box_test = selected p-value, 
+effect_size_selected_based_on_Box_test = selected effect-size values.
+
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+
+library(dplyr)
+library(skimr)
+library(readxl)
+library(tidyr)
+library(pdt)
+library(openxlsx)
+library(data.table)
+
+DataDir<-""
+OutDir<-""
+
+# Terugblik data (imputed version)
+tb<-fread(
+  paste0(DataDir,"2026-03-18_TerugblikIMP_export_260317_B23incomplete.csv"),
+  sep=";", 
+  fill=TRUE)
+tb<-as.data.frame(tb)
+
+# remove B17
+tb<-tb[!tb$Studienummer=="B17",]
+
+```
+
+*phase vars*
+phase_FSE = if_else(sent < T2_Inzichtsgesprek_date, "A", "B"),
+phase_satisf_health = if_else(sent < T2_Inzichtsgesprek_date + weeks(6), "A", "B")
+
+# FSE -------------------------
+```{r}
+results_df <- tb %>%
+  group_by(Studienummer) %>%
+  group_modify(~ {
+    
+    df <- .x
+    
+    # run the test
+    test_res <- AB_permutation_distancing_test(
+      as.factor(df$phase_FSE),
+      df$fse_imp,
+      test_statistic = "B-A",
+      test_statistic_function = "mean",
+      reps_max = 2000,
+      alpha_p_box_test = 0.1,
+      max_statistic_p_box_test = 2.7,
+      no_duplicates = FALSE,
+      remove_NA_series_above_k = TRUE
+    )
+    
+    # tables for counts
+    phase_tab <- table(df$phase_FSE)
+    
+    # outcome vectors
+    y_all <- df$fse_imp
+    y_A   <- df$fse_imp[df$phase_FSE == "A"]
+    y_B   <- df$fse_imp[df$phase_FSE == "B"]
+    
+    tibble(
+      ## test results
+      p_value = test_res$p_selected_based_on_Box_test,
+      effect  = test_res$effect_size_selected_based_on_Box_test,
+      AR      = test_res$ar1[1],
+      k       = test_res$k_selected_based_on_Box_test,
+      AR_k    = test_res$ar1[test_res$k_selected_based_on_Box_test],
+      
+    
+      ## participant characteristics
+      Age = mean(df$leeftijd_start, na.rm = TRUE),
+      Sex = mean(df$Geslacht, na.rm = TRUE),
+      
+      ## counts
+      length_A = if ("A" %in% names(phase_tab)) phase_tab["A"] else 0,
+      available_A = sum(!is.na(df$start) & df$phase_FSE == "A"),
+      length_B = if ("B" %in% names(phase_tab)) phase_tab["B"] else 0,
+      available_B = sum(!is.na(df$start) & df$phase_FSE == "B"),
+      available_AB = available_A + available_B,
+      percentage_130 = available_AB/1.30,
+      
+      ## outcome descriptives
+      mean_overall = mean(y_all, na.rm = TRUE),
+      sd_overall   = sd(y_all, na.rm = TRUE),
+      
+      mean_A = mean(y_A, na.rm = TRUE),
+      sd_A   = sd(y_A, na.rm = TRUE),
+      var_A  = var(y_A, na.rm = TRUE),
+      
+      mean_B = mean(y_B, na.rm = TRUE),
+      sd_B   = sd(y_B, na.rm = TRUE),
+      var_B  = var(y_B, na.rm = TRUE),
+      
+      mean_diff = mean_B - mean_A,
+     var_ratio     = var_B / var_A,
+     log_var_ratio = log(var_B) - log(var_A)
+    )
+  }) %>%
+  ungroup()
+
+results_df <- results_df %>%
+  mutate(
+    p_value = round(p_value, 4),
+    effect  = round(effect, 4),
+    AR = round(AR, 3),
+    AR_k = round(AR_k, 3),
+      
+    mean_overall = round(mean_overall, 2),
+    sd_overall   = round(sd_overall, 2),
+    
+    mean_A = round(mean_A, 2),
+    sd_A   = round(sd_A, 2),
+    var_A  = round(var_A, 3),
+    
+    mean_B = round(mean_B, 2),
+    sd_B   = round(sd_B, 2),
+    var_B  = round(var_B, 3),
+    mean_diff = round(mean_diff, 2),
+    var_ratio     = round(var_ratio, 3),
+    log_var_ratio = round(log_var_ratio, 3),
+    percentage_130 = round(percentage_130, 0)
+    
+  )
+
+FSE<-results_df
+```
+
+# life satisfaction
+```{r}
+
+satisfaction <- tb %>%
+  group_by(Studienummer) %>%
+  group_modify(~ {
+    
+    df <- .x
+    
+    # run the test
+    test_res <- AB_permutation_distancing_test(
+      as.factor(df$phase_satisf_health),
+      df$satisfaction_imp,
+      test_statistic = "B-A",
+      test_statistic_function = "mean",
+      reps_max = 2000,
+      alpha_p_box_test = 0.1,
+      max_statistic_p_box_test = 2.7,
+      no_duplicates = FALSE,
+      remove_NA_series_above_k = TRUE
+    )
+    
+    # tables for counts
+    phase_tab <- table(df$phase_satisf_health)
+    
+    # outcome vectors
+    y_all <- df$satisfaction_imp
+    y_A   <- df$satisfaction_imp[df$phase_satisf_health == "A"]
+    y_B   <- df$satisfaction_imp[df$phase_satisf_health == "B"]
+    
+    tibble(
+      ## test results
+      p_value = test_res$p_selected_based_on_Box_test,
+      effect  = test_res$effect_size_selected_based_on_Box_test,
+      AR    = test_res$ar1[1],
+      k       = test_res$k_selected_based_on_Box_test,
+      AR_k    = test_res$ar1[test_res$k_selected_based_on_Box_test],
+      
+      
+      ## participant characteristics
+      Age = mean(df$leeftijd_start, na.rm = TRUE),
+      Sex = mean(df$Geslacht, na.rm = TRUE),
+      
+      ## counts
+      length_A = if ("A" %in% names(phase_tab)) phase_tab["A"] else 0,
+      available_A = sum(!is.na(df$start) & df$phase_FSE == "A"),
+      length_B = if ("B" %in% names(phase_tab)) phase_tab["B"] else 0,
+      available_B = sum(!is.na(df$start) & df$phase_FSE == "B"),
+      available_AB = available_A + available_B,
+      percentage_130 = available_AB/1.30,
+      
+      
+      ## outcome descriptives
+      mean_overall = mean(y_all, na.rm = TRUE),
+      sd_overall   = sd(y_all, na.rm = TRUE),
+      
+      mean_A = mean(y_A, na.rm = TRUE),
+      sd_A   = sd(y_A, na.rm = TRUE),
+      var_A  = var(y_A, na.rm = TRUE),
+      
+      mean_B = mean(y_B, na.rm = TRUE),
+      sd_B   = sd(y_B, na.rm = TRUE),
+      var_B  = var(y_B, na.rm = TRUE),
+      
+      mean_diff = mean_B - mean_A,
+      var_ratio     = var_B / var_A,
+      log_var_ratio = log(var_B) - log(var_A)
+      
+    )
+  }) %>%
+  ungroup()%>%
+  mutate(
+    p_value = round(p_value, 4),
+    effect  = round(effect, 4),
+    AR = round(AR, 3),
+    AR_k = round(AR_k, 3),
+    
+    mean_overall = round(mean_overall, 2),
+    sd_overall   = round(sd_overall, 2),
+    
+    mean_A = round(mean_A, 2),
+    sd_A   = round(sd_A, 2),
+    var_A  = round(var_A, 3),
+    
+    mean_B = round(mean_B, 2),
+    sd_B   = round(sd_B, 2),
+    var_B  = round(var_B, 3),
+    mean_diff = round(mean_diff, 2),
+    var_ratio     = round(var_ratio, 3),
+    log_var_ratio = round(log_var_ratio, 3),
+    percentage_130 = round(percentage_130, 0)
+    
+  )
+```
+
+# health
+```{r}
+health <- tb %>%
+  group_by(Studienummer) %>%
+  group_modify(~ {
+    
+    df <- .x
+    
+    # run the test
+    test_res <- AB_permutation_distancing_test(
+      as.factor(df$phase_satisf_health),
+      df$health_imp,
+      test_statistic = "B-A",
+      test_statistic_function = "mean",
+      reps_max = 2000,
+      alpha_p_box_test = 0.1,
+      max_statistic_p_box_test = 2.7,
+      no_duplicates = FALSE,
+      remove_NA_series_above_k = TRUE
+    )
+    
+    # tables for counts
+    phase_tab <- table(df$phase_satisf_health)
+    
+    # outcome vectors
+    y_all <- df$health_imp
+    y_A   <- df$health_imp[df$phase_satisf_health == "A"]
+    y_B   <- df$health_imp[df$phase_satisf_health == "B"]
+    
+    tibble(
+      ## test results
+      p_value = test_res$p_selected_based_on_Box_test,
+      effect  = test_res$effect_size_selected_based_on_Box_test,
+      AR    = test_res$ar1[1],
+      k       = test_res$k_selected_based_on_Box_test,
+      AR_k    = test_res$ar1[test_res$k_selected_based_on_Box_test],
+      
+      
+      ## participant characteristics
+      Age = mean(df$leeftijd_start, na.rm = TRUE),
+      Sex = mean(df$Geslacht, na.rm = TRUE),
+      
+      ## counts
+      length_A = if ("A" %in% names(phase_tab)) phase_tab["A"] else 0,
+      available_A = sum(!is.na(df$start) & df$phase_FSE == "A"),
+      length_B = if ("B" %in% names(phase_tab)) phase_tab["B"] else 0,
+      available_B = sum(!is.na(df$start) & df$phase_FSE == "B"),
+      available_AB = available_A + available_B,
+      percentage_130 = available_AB/1.30,
+      
+      
+      ## outcome descriptives
+      mean_overall = mean(y_all, na.rm = TRUE),
+      sd_overall   = sd(y_all, na.rm = TRUE),
+      
+      mean_A = mean(y_A, na.rm = TRUE),
+      sd_A   = sd(y_A, na.rm = TRUE),
+      var_A  = var(y_A, na.rm = TRUE),
+      
+      mean_B = mean(y_B, na.rm = TRUE),
+      sd_B   = sd(y_B, na.rm = TRUE),
+      var_B  = var(y_B, na.rm = TRUE),
+      
+      mean_diff = mean_B - mean_A,
+      var_ratio     = var_B / var_A,
+      log_var_ratio = log(var_B) - log(var_A)
+    )
+  }) %>%
+  ungroup()%>%
+  mutate(
+    p_value = round(p_value, 4),
+    effect  = round(effect, 4),
+    AR = round(AR, 3),
+    AR_k = round(AR_k, 3),
+    
+    mean_overall = round(mean_overall, 2),
+    sd_overall   = round(sd_overall, 2),
+    
+    mean_A = round(mean_A, 2),
+    sd_A   = round(sd_A, 2),
+    var_A  = round(var_A, 3),
+    
+    mean_B = round(mean_B, 2),
+    sd_B   = round(sd_B, 2),
+    var_B  = round(var_B, 3),
+    mean_diff = round(mean_diff, 2),
+    var_ratio     = round(var_ratio, 3),
+    log_var_ratio = round(log_var_ratio, 3),
+    percentage_130 = round(percentage_130, 0)
+  )
+
+```
+
+
+
+```{r}
+# create overview table -------------
+add_suffix_and_select <- function(df, suffix) {
+  df %>%
+    select(
+      Studienummer,
+      mean_A,
+      mean_B,
+      mean_diff,
+      var_ratio,
+      effect,
+      p_value,
+      percentage_130,
+      available_B
+    ) %>%
+    rename_with(
+      ~ paste0(.x, "_", suffix),
+      -Studienummer
+    )
+}
+
+FSE_overview <- add_suffix_and_select(FSE, "FSE")
+KOL_overview <- add_suffix_and_select(satisfaction, "Satisfaction")
+GEZ_overview <- add_suffix_and_select(health, "Health")
+
+
+overview_df <- FSE_overview %>%
+  left_join(KOL_overview, by = "Studienummer") %>%
+  left_join(GEZ_overview, by = "Studienummer") 
+
+
+
+overview_sel <- overview_df %>% select(Studienummer, starts_with("effect_"), starts_with("p_value_"))
+ 
+overview_sel <- overview_df %>%
+  select(Studienummer, starts_with("effect_"), starts_with("p_value_")) %>%
+  mutate(
+    across(starts_with("effect_"), ~ round(as.numeric(.), 2)),
+    across(starts_with("p_value_"), ~ signif(as.numeric(.), 2))
+  )
+
+# write output ------
+wb <- createWorkbook()
+addWorksheet(wb, "Summary")
+addWorksheet(wb, "Overview")
+addWorksheet(wb, "FSE")
+addWorksheet(wb, "Satisfaction")
+addWorksheet(wb, "Health")
+#addWorksheet(wb, "School")
+
+writeData(wb, sheet = "Summary", overview_sel)
+writeData(wb, sheet = "Overview", overview_df)
+writeData(wb, sheet = "FSE", FSE)
+writeData(wb, sheet = "Satisfaction", satisfaction)
+writeData(wb, sheet = "Health", health)
+#writeData(wb, sheet = "School", school)
+
+
+#saveWorkbook(wb, paste0(OutDir, "2026-03-20_PDT_1sided_18Part_imputed_B23notcompleted.xlsx"), overwrite = TRUE )
+
+```
+
+

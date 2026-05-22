@@ -1,0 +1,426 @@
+---
+title: "Kallman imputation"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+
+library(imputeTS)     # To impute
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(ggplot2)
+
+# data Kalmann (based on older export, complete apart from B23)
+KalDir<-""
+load(paste0(KalDir, "kalmann.RData"))
+
+# load newest export tb data
+DataDir<-""
+OutDir<-""
+
+# Terugblik data 
+load(paste0(DataDir, "data_terugblik.RData"))
+table(tb$Studienummer)
+```
+
+# clean an empty trailing end
+```{r}
+tb<-tb[!tb$Studienummer %in% c("B18", "B19"),] # remove the participants without end date
+table(tb$Completed) # all completed
+
+# remove trailing end 
+tb <- tb %>%
+  group_by(Studienummer) %>%
+  arrange(sent, .by_group = TRUE) %>%
+  filter({
+    # Identify rows that meet removal criteria
+    candidate <- is.na(start)
+    
+    # For each candidate row, check if any non-NA start exists after it
+    has_future_start <- sapply(seq_along(start), function(i) {
+      if (!candidate[i]) return(TRUE)  # not a candidate, keep it
+      any(!is.na(start[(i + 1):length(start)]))  # TRUE if a future start exists
+    })
+    
+    # Keep row if: not a candidate, OR has a future non-NA start
+    !candidate | has_future_start
+  }) %>%
+  ungroup()
+
+```
+
+
+```{r}
+tb<-tb %>% rename(
+  fse = Grip_op_vermoeidheid,
+  satisfaction = Kijk_op_leven,
+  health = Gezondheid
+)
+
+# give correct numbers to participants
+tb <- tb %>%
+  mutate(
+    Participant = recode(Studienummer,
+      "B01" = "P1",
+      "B02" = "P2",
+      "B03" = "P3",
+      "B04" = "P4",
+      "B06" = "P5",
+      "B07" = "P6",
+      "B09" = "P7",
+      "B10" = "P8",
+      "B11" = "P9",
+      "B12" = "P10",
+      "B13" = "P11",
+      "B14" = "P12",
+      "B15" = "P13",
+      "B16" = "P14",
+      "B20" = "P15",
+      "B22" = "P16",
+      "B23" = "P17"
+    )
+  )
+
+```
+
+# function for imputation
+```{r}
+plot_kalman_imputation <- function(df, Participant) {
+  
+  # Imputation
+  df$fse_imp          <- na_kalman(df$fse,          model = "StructTS", smooth = TRUE, maxgap = Inf)
+  df$health_imp       <- na_kalman(df$health,       model = "StructTS", smooth = TRUE, maxgap = Inf)
+  df$satisfaction_imp <- na_kalman(df$satisfaction, model = "StructTS", smooth = TRUE, maxgap = Inf)
+  
+  # Reshape
+  df_long <- df %>%
+    mutate(
+      fse_missing          = is.na(fse),
+      health_missing       = is.na(health),
+      satisfaction_missing = is.na(satisfaction)
+      
+    ) %>%
+    select(sent,
+           fse_imp, fse_missing,
+          health_imp, health_missing,
+           satisfaction_imp, satisfaction_missing
+          ) %>%
+    pivot_longer(
+      cols = c(fse_imp, health_imp, satisfaction_imp),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    mutate(
+      missing = case_when(
+        variable == "fse_imp"          ~ fse_missing,
+          variable == "health_imp"       ~ health_missing,
+        variable == "satisfaction_imp" ~ satisfaction_missing
+      ),
+      variable = recode(variable,
+        fse_imp          = "Fatigue-related self-efficacy (FSE)",
+        health_imp       = "Perceived health",
+        satisfaction_imp = "Life Satisfaction"
+  
+      )
+    )
+  
+  # Plot
+  p <- ggplot(df_long, aes(x = sent, y = value)) +
+    geom_line(colour = "blue") +
+    geom_point(colour="blue") + 
+    geom_point(
+      data = filter(df_long, missing),
+      colour = "red", size = 1
+    ) +
+    facet_wrap(~ variable, ncol = 3, scales = "free_y") +
+    labs(
+      x     = "Time",
+      y     = "Value",
+      title = paste("Kalman Imputation —", Participant)
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold")
+    )
+  
+  list(data = df, plot = p)
+}
+```
+
+#B01
+```{r}
+B01<-tb[tb$Studienummer=="B01",]
+
+result <- plot_kalman_imputation(B01, unique(B01$Participant))
+B01    <- result$data
+result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B01_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B02
+```{r}
+B02<-tb[tb$Studienummer=="B02",]
+
+result <- plot_kalman_imputation(B02, unique(B02$Participant))
+B02    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B02_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B03
+```{r}
+B03<-tb[tb$Studienummer=="B03",]
+
+result <- plot_kalman_imputation(B03, unique(B03$Participant))
+B03    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B03_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+
+#B04
+```{r}
+B04<-tb[tb$Studienummer=="B04",]
+
+result <- plot_kalman_imputation(B04, unique(B04$Participant))
+B04    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B04_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+
+#B06
+```{r}
+B06<-tb[tb$Studienummer=="B06",]
+
+result <- plot_kalman_imputation(B06, unique(B06$Participant))
+B06    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B06_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B07
+```{r}
+B07<-tb[tb$Studienummer=="B07",]
+
+result <- plot_kalman_imputation(B07, unique(B07$Participant))
+B07    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B07_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B09
+```{r}
+B09<-tb[tb$Studienummer=="B09",]
+
+result <- plot_kalman_imputation(B09, unique(B09$Participant))
+B09    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B09_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B10
+```{r}
+B10<-tb[tb$Studienummer=="B10",]
+
+result <- plot_kalman_imputation(B10, unique(B10$Participant))
+B10    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B10_imp_noEnd.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+
+
+```
+
+#B11
+```{r}
+B11<-tb[tb$Studienummer=="B11",]
+
+result <- plot_kalman_imputation(B11, unique(B11$Participant))
+B11    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B11_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B12
+```{r}
+B12<-tb[tb$Studienummer=="B12",]
+
+result <- plot_kalman_imputation(B12, unique(B12$Participant))
+B12    <- result$data
+#result$plot
+
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B12_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B13
+```{r}
+B13<-tb[tb$Studienummer=="B13",]
+
+result <- plot_kalman_imputation(B13, unique(B13$Participant))
+B13    <- result$data
+#result$plot
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B13_imp_noEnd.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+
+```
+
+#B14
+```{r}
+B14<-tb[tb$Studienummer=="B14",]
+
+result <- plot_kalman_imputation(B14, unique(B14$Participant))
+B14    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B14_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B15
+```{r}
+B15<-tb[tb$Studienummer=="B15",]
+
+result <- plot_kalman_imputation(B15, unique(B15$Participant))
+B15    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B15_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+#B16
+```{r}
+B16<-tb[tb$Studienummer=="B16",]
+
+result <- plot_kalman_imputation(B16, unique(B16$Participant))
+B16    <- result$data
+#result$plot
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B16_imp_noEnd.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+
+```
+
+#B20
+```{r}
+B20<-tb[tb$Studienummer=="B20",]
+
+result <- plot_kalman_imputation(B20,unique(B20$Participant))
+B20    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B20_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+```
+
+
+#B22
+```{r}
+B22<-tb[tb$Studienummer=="B22",]
+result <- plot_kalman_imputation(B22, unique(B22$Participant))
+B22    <- result$data
+#result$plot
+
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B22_imp.jpeg"), plot = result$plot, width = 10, height = 5, units = "in", dpi = 300)
+
+
+```
+
+#B23
+```{r}
+B23<-tb[tb$Studienummer=="B23",]
+result <- plot_kalman_imputation(B23, unique(B23$Participant))
+B23    <- result$data
+#result$plot
+ggsave(paste0(OutDir, "1_Imputation/2026-04-21_B23_imp.jpeg"), plot = result$plot, width = 10, height = 6, units = "in", dpi = 300)
+```
+
+# combine data 
+```{r}
+tb_imp<-bind_rows(
+  B01, 
+  B02,
+  B03,
+  B04,
+  B06,
+  B07,
+  B09,
+  B10,
+  B11,
+  B12,
+  B13, 
+  B14,
+  B15,
+  B16,
+  B17,
+  B20,
+  B21,
+  B22,
+  B23,
+  B23_original
+  )
+```
+
+# correct the phase A and B vars for B23
+```{r}
+# create a time var for everyone
+tb_imp <- tb_imp %>%
+  arrange(Studienummer, sent)
+# make sure ordered in time
+tb_imp %>%
+  group_by(Studienummer) %>%
+  summarise(is_sorted = all(diff(sent) >= 0))
+
+
+tb_imp <- tb_imp %>%
+  group_by(Studienummer) %>%
+  mutate(time = row_number()) %>%
+  ungroup()
+
+
+tb_imp<- tb_imp %>%
+  group_by(Studienummer) %>%
+#  arrange(time, .by_group = TRUE) %>%
+  mutate(
+    ref_time = {
+      idx <- which(phase_FSE == "B")
+      if (length(idx) == 0) NA_real_ else time[min(idx)]
+    }
+  )
+
+tb_imp <- tb_imp %>%
+  group_by(Studienummer) %>%
+    mutate(
+      phase_cis4_school = if_else(
+      time < ref_time + 28, "A", "B"
+    ),
+
+    phase_satisf_health = if_else(
+      time < ref_time + 42, "A", "B"
+    )
+  ) %>%
+  ungroup()
+```
+
+
+# save data 
+```{r}
+write.table(
+  tb_imp,
+  file = paste0(DataDir, "2026-04-01_TerugblikIMP_export_260331.csv"),
+  sep = ";",
+  row.names = FALSE,
+  col.names = TRUE,
+  dec = "."  # decimal point
+)
+
+```
+

@@ -1,0 +1,308 @@
+---
+title: "RQ5: Pre-Post Longterm"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# load data 
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+
+library(dplyr)
+library(skimr)
+library(readxl)
+library(tidyr)
+library(openxlsx)
+library(writexl) 
+library(readxl)
+library(stringr) # str replace all
+library(broom)
+
+DataDir<-""
+KlikDir<-""
+OutDir<-""
+
+# load meta data ------
+meta<- read.csv(paste0(DataDir,"2026-03-31_MetaData_participants.csv"), sep = ";" )
+
+# load and select klik data  (watch out - old KLIK! )
+klik<- read.csv(paste0(KlikDir,"klik_to_database_Booster_Maartje_Stutvoet_2026-04-09.csv"), 
+                sep = ";",
+                dec = ",")
+  
+# select participants (completed)
+meta<-meta[meta$Completed==1 ,]
+
+```
+
+# clean data  (meta and klik)
+```{r}
+## dates meta ------
+meta$Diag_date<-as.Date(meta$Date.diagnosis.Chronic.disease,  format = "%d-%m-%Y")
+meta$T0_PreMeet_date<-as.Date(meta$Opstart,  format = "%d-%m-%Y") #T0
+meta$T2_Inzichtsgesprek_date<-as.Date(meta$Inzichtgesprek,  format = "%d-%m-%Y") #T2
+meta$T3_Evaluatiegesprek_date<-as.Date(meta$Evaluatiegesprek,  format = "%d-%m-%Y") #T3
+
+# disease duration
+meta$Disease_duration<-as.numeric(meta$T0_PreMeet_date- meta$Diag_date)
+meta$Disease_duration<-round(meta$Disease_duration/365, 2)
+
+## dates  -----
+klik <- klik[, colSums(!is.na(klik)) > 0]
+
+klik <- klik %>%
+  mutate(across(ends_with("Datum"), ~ as.Date(.x, format = "%Y-%m-%d")))
+
+# multiple Invuldatums per row 
+klik <- klik %>%
+  rowwise() %>%
+  mutate(
+    same_date = {
+      vals <- c_across(ends_with("InvulDatum"))
+      vals <- vals[!is.na(vals)]
+      length(vals) <= 1 || length(unique(vals)) == 1
+    }
+  ) %>%
+  ungroup()
+table(klik$same_date) # all are the same date 
+
+# create an invuldatum per row
+klik <- klik %>%
+  rowwise() %>%
+  mutate(
+    Date_klik = first(na.omit(c_across(ends_with("InvulDatum"))))
+  ) %>%
+  ungroup()
+
+
+date<-meta[,c("Studienummer", "KLIK", "T0_PreMeet_date", "T2_Inzichtsgesprek_date", "T3_Evaluatiegesprek_date")]
+klik<-merge(date, klik, by.x="KLIK", by.y = "PatientID") # removes the patients that did not complete the study
+
+
+klik$T0_daysbefore<-as.numeric(klik$T0_PreMeet_date- klik$Date_klik) # if pos: klik before start study, if negative: klik after start study
+klik$T2_daysafter<-as.numeric(klik$Date_klik- klik$T2_Inzichtsgesprek_date) # if pos: klik after Inzichtsgesprek, if negative: klik before
+klik$T3_daysafter<-as.numeric(klik$Date_klik- klik$T3_Evaluatiegesprek_date) # if pos: klik after  study, if negative: klik before end  study
+
+```
+# create date format 
+```{r}
+
+klik$T0<-if_else(klik$T0_daysbefore <= 90 & klik$T0_daysbefore>= -28,1, 0)
+table(klik$T0, klik$Studienummer)
+# watch out: multuple timepoints, because people filled out in 2 shifts . B12, B13, B20 at the same date 
+
+klik$T3<-if_else(klik$T3_daysafter <= 60 & klik$T3_daysafter>= -14, 1,0)
+table(klik$T3, klik$Studienummer)
+# B04 & B10 & B23 missing
+
+#test<-klik[klik$Studienummer %in% c("B12", "B13", "B20", "B23"),]
+#test[,c("Studienummer", "T2_Inzichtsgesprek_date", "Date_klik" , "T0_daysbefore", "T0")]
+#test<-klik[klik$Studienummer %in% c("B23"),]
+
+
+```
+
+
+# clean questionnaires of interest  ----------------------------------------------------------------------
+# CIS4 --------------------------------------
+```{r}
+# calculate the CIS sumscore 
+#reverse coding items k_pro_cis4_CIS_4_1, k_pro_cis4_CIS_4_2, k_pro_cis4_CIS_4_4
+klik <- klik %>% 
+  mutate(k_pro_cis4_CIS_4_1_recoded = recode(k_pro_cis4_CIS_4_1, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+klik <- klik %>% 
+  mutate(k_pro_cis4_CIS_4_2_recoded = recode(k_pro_cis4_CIS_4_2, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+klik <- klik %>% 
+  mutate(k_pro_cis4_CIS_4_4_recoded = recode(k_pro_cis4_CIS_4_4, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+
+#Calculate total score
+klik <- klik %>% mutate(k_CIS4_total = rowSums(across(c("k_pro_cis4_CIS_4_1_recoded", "k_pro_cis4_CIS_4_2_recoded", "k_pro_cis4_CIS_4_3", "k_pro_cis4_CIS_4_4_recoded"))))
+#Classify total score in group <20 geen vermoeidheid >= 20 wel vermoeidheid
+klik <- klik %>% mutate(k_CIS4_total_bin = case_when(k_CIS4_total < 20 ~ 'geen vermoeidheid',
+                                             k_CIS4_total >= 20 ~ 'wel vermoeidheid',
+                                                       TRUE ~ NA))
+
+```
+# FSE -------------------------------------------------------------------------------------------
+```{r}
+# range: 7-28, higher is better
+summary(klik$k_qvs_selfefficacy_veranderen_moeheid)
+summary(klik$k_qvs_selfefficacy_beinvloeden_moeheid) # 1 - 4
+summary(klik$k_qvs_selfefficacy_machteloosheid)
+
+#machteloos = reverse coded
+klik <- klik %>% 
+  mutate(k_qvs_selfefficacy_machteloosheid_reverse = recode(k_qvs_selfefficacy_machteloosheid, '1'=4, '2'=3, '3'=2, '4'=1))
+
+# FSE7
+#Calculate total score
+klik <- klik %>% mutate(FSE7 = rowSums(across(c("k_qvs_selfefficacy_beinvloeden_moeheid", "k_qvs_selfefficacy_veranderen_moeheid", 
+                                              "k_qvs_selfefficacy_instelling_moeheid", "k_qvs_selfefficacy_positief_beinvloeden",
+                                              "k_qvs_selfefficacy_machteloosheid_reverse", "k_qvs_selfefficacy_controle_moeheid",
+                                              "k_qvs_selfefficacy_leren_beinvloeden"  ))))
+
+summary(klik$FSE7) # range 11 - 28
+
+fse_items <- c(
+  "k_qvs_selfefficacy_beinvloeden_moeheid",
+  "k_qvs_selfefficacy_veranderen_moeheid",
+  "k_qvs_selfefficacy_instelling_moeheid",
+  "k_qvs_selfefficacy_positief_beinvloeden",
+  "k_qvs_selfefficacy_machteloosheid_reverse",
+  "k_qvs_selfefficacy_controle_moeheid",
+  "k_qvs_selfefficacy_leren_beinvloeden"
+)
+
+cor_matrix <- cor(
+  klik[, fse_items],
+  use = "pairwise.complete.obs",
+  method = "pearson"
+)
+round(cor_matrix, 2)
+
+```
+# schoolparticipation ------------------------------------------------------------------------------------------------
+```{r}
+summary(klik$k_pro_schoolparticipatie_schoolverzuim) # all between 0 and 100
+# check availabiltiy
+test<-klik[klik$T0==1 & !is.na(klik$k_pro_schoolparticipatie_schoolverzuim),]
+dim(test)
+table(klik$Studienummer %in% test$Studienummer ) # all baseline
+
+
+```
+
+
+# make wide dataset T0 T3
+```{r}
+library(ggplot2)
+
+outcomes <- c(
+  "FSE7",
+  "k_CIS4_total",
+  "k_pro_schoolparticipatie_schoolverzuim"
+ 
+)
+
+get_time_value <- function(df, time_flag, var) {
+  df %>%
+    filter(.data[[time_flag]] == 1) %>%
+    group_by(Studienummer) %>%
+    summarise(
+      value = {
+        vals <- unique(na.omit(.data[[var]]))
+        if (length(vals) == 0) NA else vals[1]
+      },
+      .groups = "drop"
+    )
+}
+
+# build wide dataset
+library(purrr)
+library(tibble)
+
+wide_data <- reduce(outcomes, function(acc, var) {
+  
+  t0 <- get_time_value(klik, "T0", var) %>%
+    mutate(!!paste0(var, "_T0") := value) %>%
+    select(Studienummer, !!paste0(var, "_T0"))
+  
+  t3 <- get_time_value(klik, "T3", var) %>%
+    mutate(!!paste0(var, "_T3") := value) %>%
+    select(Studienummer, !!paste0(var, "_T3"))
+  
+  acc %>%
+    full_join(t0, by = "Studienummer") %>%
+    full_join(t3, by = "Studienummer")
+  
+}, .init = tibble(Studienummer = unique(klik$Studienummer)))
+
+
+```
+
+# plot data
+```{r}
+plot_data <- wide_data %>%
+  pivot_longer(
+    cols = -Studienummer,
+    names_to = c("variable", "time"),
+    names_sep = "_T",
+    values_to = "value"
+  ) %>%
+  mutate(time = paste0("T", time))
+
+
+library(patchwork)
+
+plots <- lapply(outcomes, function(v) {
+  ggplot(filter(plot_data, variable == v),
+         aes(x = value, fill = time)) +
+    geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+    labs(title = v) +
+    theme_minimal()
+})
+
+combined <- wrap_plots(plots)
+
+ggsave(
+  paste0(OutDir,"2026-04-09_Histograms_T0T3_klikexp20260409.jpeg"),
+  combined,
+  width = 12,
+  height = 10
+)
+
+```
+
+# analysis 1 : pre-post -----------------------------------------------------------------------------------
+paired t test
+do people change? 
+
+```{r}
+
+run_ttest <- function(var, df) {
+  
+  t0 <- df[[paste0(var, "_T0")]]
+  t3 <- df[[paste0(var, "_T3")]]
+  
+  df_pair <- data.frame(t0, t3) %>%
+    filter(!is.na(t0) & !is.na(t3))
+  
+  ttest <- t.test(df_pair$t3, df_pair$t0, paired = TRUE)
+  
+  tidy(ttest) %>%
+    mutate(variable = var) %>%
+    select(variable, estimate, statistic, p.value, conf.low, conf.high)
+}
+
+
+# run statistics on the complete set
+wide_data_sel<-wide_data[!wide_data$Studienummer %in% c("B04", "B10"),]
+
+results <- do.call(rbind, lapply(outcomes, run_ttest, df = wide_data_sel))
+
+summaries <- lapply(outcomes, function(v) {
+  
+  tibble(
+    variable = v,
+    mean_T0 = mean(wide_data_sel[[paste0(v, "_T0")]], na.rm = TRUE),
+    sd_T0   = sd(wide_data_sel[[paste0(v, "_T0")]], na.rm = TRUE),
+    mean_T3 = mean(wide_data_sel[[paste0(v, "_T3")]], na.rm = TRUE),
+    sd_T3   = sd(wide_data_sel[[paste0(v, "_T3")]], na.rm = TRUE)
+  )
+}) %>%
+  bind_rows()
+
+# make one overview
+ressum<-merge(summaries, results, by="variable")
+ressum[, 2:10]<-round(ressum[, 2:10], 2)
+ressum <- ressum %>%
+  mutate(variable = factor(variable, levels = outcomes)) %>%
+  arrange(variable)
+
+
+# save the output
+write_xlsx(ressum, paste0(OutDir, "2026-04-15_pairedTtest_T0T3_klikexp20260409_B23Added.xlsx"))
+
+```
+

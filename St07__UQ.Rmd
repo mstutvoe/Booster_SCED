@@ -1,0 +1,166 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+
+rm(list = objects())
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(data.table)
+library(openxlsx)
+
+DataDir<-""
+OutDir<-""
+
+# load complte m-path data, cleaned
+load(paste0(DataDir, "data.RData"))
+
+
+table(df$Studienummer)
+table(df$Completed, df$Studienummer) # all participants, also the excluded ones 
+# select Qs that are filled out
+df<-df[!is.na(df$start),]
+
+# only pariticpants that completed the study
+df<-df[df$Completed==1,]
+
+
+# select the questionnaires
+ev_meet<-df[df$questionnaire=="Evalatie app"| df$questionnaire=="Evaluatie app",] # evaluatie na meetperiode
+ev_exp<-df[df$questionnaire=="Evaluatie Booster ",]   # evaluatie einde 
+
+
+
+
+```
+# clean data 
+```{r}
+# remove the second UQ of B13
+table(ev_meet$Studienummer) # B13 has two
+ev_meet <- ev_meet[, colSums(!is.na(ev_meet)) > 0]
+ev_meet <- ev_meet[!(ev_meet$Studienummer== "B13" & ev_meet$start_date> "2025-04-16"),]
+
+# remove the UQ B23 before end of intervention
+table(ev_exp$Studienummer) # only B23 has 3
+ev_exp <- ev_exp[, colSums(!is.na(ev_exp)) > 0]
+ev_exp <- ev_exp[!(ev_exp$Studienummer== "B23" & ev_exp$start_date<ev_exp$T3_Evaluatiegesprek_date),]
+
+```
+
+# select coluns of interest
+```{r}
+exp_cols <- c(
+  "Studienummer",  "Completed",
+ # "scheduled", "sent", "start", "stop", "scheduled_orig",
+  "usability_e", "behulpzaam_e", "leuk_e", "duidelijk_e", "mooi_e",
+  "geheel_e", "toekomst_e", "toekomst_ja_e", "toekomst_nee_e", "NPS_e",
+  "gebruik_e", "motivatie_e", "motivatie_spel_e", "motivatie_track_e",
+  "motivatie_punten_e", "motivatie_teksten_e", "motivatie_dagboek_e",
+  "motivatie_voortgang_e", "motivatie_rapport_e", "motivatie_droom_e",
+  "motivatie_gesprekken_e", "gesprekken_waarde_e",
+  "effect_e_string", "fse_e",
+  "fse_personalisatie_e", "fse_checkups_e", "fse_terugblik_e",
+  "fse_dagboek_e", "fse_rapport_e", "fse_voortgang_e",
+  "fse_doelinapp_e", "fse_doelgehaald_e",
+  "beste_e", "minste_e", "feedback_e"
+)
+
+meet_cols <- c(
+  "Studienummer", "Completed",
+#  "scheduled", "sent", "start", "stop", "scheduled_orig",
+  "usability_m", "behulpzaam_m", "leuk_m", "duidelijk_m", "mooi_m",
+  "geheel_m", "toekomst_m", "toekomst_ja_m", "toekomst_nee_m", "NPS_m",
+  "gebruik_m", "motivatie_m", "motivatie_spel_m", "motivatie_track_m",
+  "motivatie_punten_m", "motivatie_teksten_meet", "motivatie_dagboek_m",
+  "motivatie_awards_m", "motivatie_gesprekken_m", "gesprekken_waarde_m",
+  "effect_m_string", "fse_m",
+  "fse_personalisatie_m", "fse_checkups_m", "fse_terugblik_m",
+  "fse_dagboek_m",
+  "beste_m", "minste_m", "feedback_m"
+)
+
+
+uq_e<-ev_exp[,exp_cols]
+uq_m<-ev_meet[,meet_cols]
+
+```
+
+```{r}
+exp_summary <- uq_e %>%
+  summarise(
+    across(
+      where(is.numeric),
+      list(
+        mean   = ~mean(.x, na.rm = TRUE),
+        sd     = ~sd(.x, na.rm = TRUE),
+        median = ~median(.x, na.rm = TRUE),
+        Q1     = ~quantile(.x, 0.25, na.rm = TRUE),
+        Q3     = ~quantile(.x, 0.75, na.rm = TRUE)
+      )
+    )
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.+)_(mean|sd|median|Q1|Q3)$"
+  )
+
+exp_summary<-exp_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 1)))
+
+
+mt_summary <- uq_m %>%
+  summarise(
+    across(
+      where(is.numeric),
+      list(
+        mean   = ~mean(.x, na.rm = TRUE),
+        sd     = ~sd(.x, na.rm = TRUE),
+        median = ~median(.x, na.rm = TRUE),
+        Q1     = ~quantile(.x, 0.25, na.rm = TRUE),
+        Q3     = ~quantile(.x, 0.75, na.rm = TRUE)
+      )
+    )
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.+)_(mean|sd|median|Q1|Q3)$"
+  )
+
+mt_summary<-mt_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 1)))
+```
+
+# save the output 
+```{r}
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "UQ_meet_summary")
+writeData(wb, sheet = "UQ_meet_summary", mt_summary)
+
+
+addWorksheet(wb, "UQ_meet_part")
+writeData(wb, sheet = "UQ_meet_part", uq_m)
+
+
+addWorksheet(wb, "UQ_exp_summary")
+writeData(wb, sheet = "UQ_exp_summary", exp_summary)
+
+
+addWorksheet(wb, "UQ_exp_part")
+writeData(wb, sheet = "UQ_exp_part", uq_e)
+
+
+saveWorkbook(wb, paste0(OutDir,"2026-04-10_UQ_Meet_Exp.xlsx"), overwrite = TRUE )
+
+
+```
+
+

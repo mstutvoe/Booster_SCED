@@ -1,0 +1,425 @@
+---
+title: "ITSA"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+AR = correlation past errors
+MA = correlation past shocks/noise (moving average)
+ARMA(p,q)
+p = number of AR (AutoRegressive) terms 
+q = number of MA (Moving Average) terms
+Different ARMA structures decide how many past timepoints and how many past shocks matter.
+
+
+*Huitema* 
+A flexible approach involves specifying a *four-parameter regression model* that provides 
+> estimates of level change and slope change from the first phase to the second.
+> estimation usually can be carried out using either conventional ordinary least squares (OLS) or, if autocorrelated errors are present and 
+large samples are available, generalized least squares (GLS). 
+
+*parameters*
+- phase 1 intercept
+- phase 1 slope
+- level change (immediate effect after intervention)
+- slope change (change in slope after intervention)
+*slope-change var*
+this var will be 0 in baseline phase, because *df$D  (D = 0 in baseline)
+first point of intervention  = 0 as well, because n1 = number of obs in baseline
+it counts the difference in time since the start of intervention
+
+### full 4 parameter model
+model_full <- lm(Y ~ T + D + slope_change_var, data = df)
+summary(model_full)
+
+### output
+Y=β0+β1T+β2D+β3[(T−(n1+1))D]
+β₀ = Phase‑1 intercept
+β₁ = Phase‑1 slope
+β₂ = level change
+β₃ = slope change.
+> Phase‑2 slope = β₁ + β₃  
+coef(model_full)["T"] + coef(model_full)["slope_change_var"]
+
+It is assumed that the errors of the model possess the following properties:
+1. Independence. The value of each error is statistically independent of all other
+errors. In the case of a time-series design, it is assumed that errors before and
+after the error at time t contain no information (beyond that provided by the
+mean of the errors) that is useful in predicting the error at time t. --> *checks for AR!!*
+2. Constant variance. Regardless of the level of the X variable(s) included in the
+model, the associated process errors have a common variance. --> *homosced* 
+3. Identical distributions. The process errors associated with each level of the X
+variable(s) are identically distributed.
+
+
+# load data and packages 
+```{r}
+rm(list = objects())
+
+library(dplyr)
+#library(readxl)
+library(tidyr)
+library(data.table)
+library(nlme) # gls
+library(openxlsx)
+#library(ggplot2)
+
+DataDir<-""
+OutDir<-""
+
+# Terugblik data (imputed version)
+tb<-fread(
+  paste0(DataDir,"2026-04-01_TerugblikIMP_export_260331.csv"),
+  sep=";", 
+  fill=TRUE)
+tb<-as.data.frame(tb)
+```
+
+# prepare data for analysis (tb)
+not done: removal of dates after
+Dummy needed for later calculation (time since intervention)
+needed to make a numerical (nrow) time indication for later calculation for slope-change var
+```{r}
+# remove B17 (excluded from study)
+tb<-tb[tb$Completed==1,]
+#tb<-tb[!tb$Studienummer %in% c("B21", "B23_original")]
+table(tb$Studienummer)
+table(tb$sent_date > tb$T3_Evaluatiegesprek_date) # not removed single case analysis
+
+### phase indicator 
+# create dummy for intervention phase 
+tb$intervention_fse <-if_else(tb$phase_FSE=="A", 0, 1)
+tb$intervention_satisf_health<-if_else(tb$phase_satisf_health=="A", 0, 1)
+
+# time indication (nrow in time)
+#class(tb$sent)
+  tb <- tb %>%
+  group_by(Studienummer) %>%
+  mutate(
+    nA_SF = sum(intervention_satisf_health == 0),
+    slope_change_satis_health = (time - (nA_SF + 1)) * intervention_satisf_health,
+    nA_FSE = sum(intervention_fse == 0),
+    slope_change_fse = (time - (nA_FSE + 1))* intervention_fse
+  ) %>%
+  ungroup()
+  
+```
+
+# B14 did not converge; add these data 
+```{r}
+
+B14<-tb[tb$Studienummer=="B14" & !is.na(tb$Studienummer),]
+
+## AR 1 FSE -------------------------------------------
+B14_fse_imp_full_ar1 <- gls(fse_imp ~ time + intervention_fse + slope_change_fse,
+                 correlation = corARMA(p=1, q=0, form = ~ time),
+                 data = B14)
+
+# normalized residuals
+resid <- residuals(B14_fse_imp_full_ar1, type = "normalized")
+
+# assumption checks
+# AR
+acf(B14_fse_imp_full_ar1) 
+pacf(B14_fse_imp_full_ar1)
+
+# hetrosced
+plot(resid ~ fitted(B14_fse_imp_full_ar1))
+
+# normality
+qqnorm(resid)
+qqnorm(resid[B14$intervention_fse == 0])
+qqnorm(resid[B14$intervention_fse == 1])
+
+hist(resid)
+hist(resid[B14$intervention_fse == 0])
+hist(resid[B14$intervention_fse == 1])
+
+summary(B14_fse_imp_full_ar1) # save the output values 
+
+ s  <- summary(B14_fse_imp_full_ar1)
+  coef_m <- s$tTable   # columns: Value, Std.Error, t-value, p-value
+
+  coef_df <- data.frame(
+    Studienummer  = "B14",
+    dep_var       = "fse_imp",
+    term          = rownames(coef_m),
+    estimate      = round(coef_m[, "Value"],     2),
+    std_error     = round(coef_m[, "Std.Error"],  2),
+    t_value       = round(coef_m[, "t-value"],    2),
+    p_value       = signif(coef_m[, "p-value"],   2),
+    # ── extra useful info ──────────────────────────────────────────────────
+    n_obs         = s$dims$N,
+ #   logLik        = round(as.numeric(logLik(model)), 2),
+#    AIC           = round(AIC(model), 2),
+#    BIC           = round(BIC(model), 2),
+    row.names     = NULL
+  )
+
+print(coef_df)
+fse_B14<-coef_df
+
+```
+# FSE (imp and orig)
+```{r}
+# ── Settings ──────────────────────────────────────────────────────────────────
+studienummers <- unique(tb$Studienummer)   # all unique IDs
+#dep_var       <- "fse_imp"                 # dependent variable label for table
+dep_var       <- "fse"                 # dependent variable label for table
+
+# ── Output containers ─────────────────────────────────────────────────────────
+results_list <- list()
+
+# ── Loop ──────────────────────────────────────────────────────────────────────
+for (id in studienummers) {
+
+  cat("Processing:", id, "\n")
+
+  # 1. Subset data
+  dat <- tb[tb$Studienummer == id, ]
+
+  # 2. Fit ARMA(1,1) model
+  model <- tryCatch(
+    gls(as.formula(paste(dep_var, "~ time + intervention_fse + slope_change_fse")),
+        correlation = corARMA(p = 1, q = 1, form = ~ time),
+        data = dat,
+        na.action = na.omit),
+    error = function(e) {
+      message("  Model failed for ", id, ": ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(model)) next
+
+  # 3. Normalized residuals
+used <- as.integer(rownames(model$data))  # rows kept after na.omit
+res  <- residuals(model, type = "normalized")
+fit  <- fitted(model)
+ pre  <- dat$intervention_fse == 0
+  post <- dat$intervention_fse == 1
+  
+  # 4. Save assumption plots to PDF ──────────────────────────────────────────
+  pdf_path <- file.path(OutDir, paste0(id, "_ITSA_assumptions_", dep_var, ".pdf"))
+  pdf(pdf_path, width = 8, height = 6)
+
+  # ACF / PACF
+  acf(res,  main = paste(id, "– ACF normalized residuals"))
+  pacf(res, main = paste(id, "– PACF normalized residuals"))
+
+  # Homoscedasticity
+  plot(res ~ fit,
+       xlab = "Fitted values", ylab = "Normalized residuals",
+       main = paste(id, "– Residuals vs Fitted"))
+  abline(h = 0, lty = 2, col = "grey50")
+
+  # QQ plots
+  qqnorm(res,       main = paste(id, "– QQ: all"))
+  qqline(res)
+  qqnorm(res[pre],  main = paste(id, "– QQ: pre-intervention"))
+  qqline(res[pre])
+  qqnorm(res[post], main = paste(id, "– QQ: post-intervention"))
+  qqline(res[post])
+
+  # Histograms
+  hist(res,       main = paste(id, "– Hist: all"),       xlab = "Normalized residuals")
+  hist(res[pre],  main = paste(id, "– Hist: pre"),        xlab = "Normalized residuals")
+  hist(res[post], main = paste(id, "– Hist: post"),       xlab = "Normalized residuals")
+
+  dev.off()
+  cat("  Plots saved to:", pdf_path, "\n")
+
+  # 5. Extract model summary table ───────────────────────────────────────────
+  s      <- summary(model)
+  coef_m <- s$tTable   # columns: Value, Std.Error, t-value, p-value
+
+  coef_df <- data.frame(
+    Studienummer  = id,
+    dep_var       = dep_var,
+    term          = rownames(coef_m),
+    estimate      = round(coef_m[, "Value"],     2),
+    std_error     = round(coef_m[, "Std.Error"],  2),
+    t_value       = round(coef_m[, "t-value"],    2),
+    p_value       = signif(coef_m[, "p-value"],   2),
+    # ── extra useful info ──────────────────────────────────────────────────
+    n_obs         = s$dims$N,
+   # logLik        = round(as.numeric(logLik(model)), 2),
+   #AIC           = round(AIC(model), 2),
+   # BIC           = round(BIC(model), 2),
+    row.names     = NULL
+  )
+
+  results_list[[id]] <- coef_df
+}
+
+# 6. Combine into one table ────────────────────────────────────────────────────
+results_table <- do.call(rbind, results_list)
+rownames(results_table) <- NULL
+
+# 7. Inspect / save ────────────────────────────────────────────────────────────
+print(results_table)
+
+fse_orig<-results_table
+#fse_imp<-results_table
+#fse_imp<-bind_rows(fse_imp, fse_B14)
+
+```
+
+# health and satisfaction
+```{r}
+# ── Settings ──────────────────────────────────────────────────────────────────
+#studienummers <- unique(tb$Studienummer)   # all unique IDs
+dep_var       <- "health"
+#dep_var       <- "health_imp"
+#dep_var       <- "satisfaction"
+#dep_var       <- "satisfaction_imp"
+
+
+
+# ── Output containers ─────────────────────────────────────────────────────────
+results_list <- list()
+
+# ── Loop ──────────────────────────────────────────────────────────────────────
+for (id in studienummers) {
+
+  cat("Processing:", id, "\n")
+
+  # 1. Subset data
+  dat <- tb[tb$Studienummer == id, ]
+
+  # 2. Fit ARMA(1,1) model
+  model <- tryCatch(
+    gls(as.formula(paste(dep_var, "~ time + intervention_satisf_health + slope_change_satis_health")),
+        correlation = corARMA(p = 1, q = 1, form = ~ time),
+        data = dat,
+        na.action = na.omit),
+    error = function(e) {
+      message("  Model failed for ", id, ": ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(model)) next
+
+  # 3. Normalized residuals
+used <- as.integer(rownames(model$data))  # rows kept after na.omit
+res  <- residuals(model, type = "normalized")
+fit  <- fitted(model)
+pre  <- dat$intervention_satisf_health == 0
+post <- dat$intervention_satisf_health == 1
+
+  # 4. Save assumption plots to PDF ──────────────────────────────────────────
+  pdf_path <- file.path(OutDir, paste0(id, "_ITSA_assumptions_", dep_var, ".pdf"))
+  pdf(pdf_path, width = 8, height = 6)
+
+  # ACF / PACF
+  acf(res,  main = paste(id, "– ACF normalized residuals"))
+  pacf(res, main = paste(id, "– PACF normalized residuals"))
+
+  # Homoscedasticity
+  plot(res ~ fit,
+       xlab = "Fitted values", ylab = "Normalized residuals",
+       main = paste(id, "– Residuals vs Fitted"))
+  abline(h = 0, lty = 2, col = "grey50")
+
+  
+  # QQ plots
+qqnorm(res, main = paste(id, "– QQ: all"))
+qqline(res)
+if (sum(!is.na(res[pre])) > 1) {
+  qqnorm(res[pre], main = paste(id, "– QQ: pre-intervention"))
+  qqline(res[pre])
+} else {
+  plot.new(); title(paste(id, "– QQ: pre — insufficient data"))
+}
+if (sum(!is.na(res[post])) > 1) {
+  qqnorm(res[post], main = paste(id, "– QQ: post-intervention"))
+  qqline(res[post])
+} else {
+  plot.new(); title(paste(id, "– QQ: post — insufficient data"))
+}
+
+# Histograms
+hist(res, main = paste(id, "– Hist: all"), xlab = "Normalized residuals")
+if (sum(!is.na(res[pre])) > 1) {
+  hist(res[pre], main = paste(id, "– Hist: pre"), xlab = "Normalized residuals")
+} else {
+  plot.new(); title(paste(id, "– Hist: pre — insufficient data"))
+}
+if (sum(!is.na(res[post])) > 1) {
+  hist(res[post], main = paste(id, "– Hist: post"), xlab = "Normalized residuals")
+} else {
+  plot.new(); title(paste(id, "– Hist: post — insufficient data"))
+}
+
+  dev.off()
+  cat("  Plots saved to:", pdf_path, "\n")
+
+  # 5. Extract model summary table ───────────────────────────────────────────
+  s      <- summary(model)
+  coef_m <- s$tTable   # columns: Value, Std.Error, t-value, p-value
+
+  coef_df <- data.frame(
+    Studienummer  = id,
+    dep_var       = dep_var,
+    term          = rownames(coef_m),
+    estimate      = round(coef_m[, "Value"],     2),
+    std_error     = round(coef_m[, "Std.Error"],  2),
+    t_value       = round(coef_m[, "t-value"],    2),
+    p_value       = signif(coef_m[, "p-value"],   2),
+    # ── extra useful info ──────────────────────────────────────────────────
+    n_obs         = s$dims$N,
+ #   logLik        = round(as.numeric(logLik(model)), 2),
+#    AIC           = round(AIC(model), 2),
+#    BIC           = round(BIC(model), 2),
+    row.names     = NULL
+  )
+
+  results_list[[id]] <- coef_df
+}
+
+# 6. Combine into one table ────────────────────────────────────────────────────
+results_table <- do.call(rbind, results_list)
+rownames(results_table) <- NULL
+
+# 7. Inspect / save ────────────────────────────────────────────────────────────
+print(results_table)
+
+
+health_orig<-results_table
+#health_imp<-results_table
+#satisfaction_orig<-results_table
+#satisfaction_imp<-results_table
+
+
+```
+
+
+
+# save the output 
+```{r}
+# Create a new workbook
+wb <- createWorkbook()
+
+# List of dataframes
+dfs <- list(
+  fse_imp = fse_imp,
+  health_imp = health_imp,
+  satisfaction_imp = satisfaction_imp,
+  fse_orig = fse_orig,
+  health_orig = health_orig,
+  satisfaction_orig = satisfaction_orig
+)
+
+# Loop over list and add each to its own sheet
+for (name in names(dfs)) {
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, dfs[[name]])
+}
+
+# Save the workbook
+saveWorkbook(wb, file = paste0(OutDir, "2026-04-01_ITSA-output.xlsx"), overwrite = TRUE)
+
+```
+

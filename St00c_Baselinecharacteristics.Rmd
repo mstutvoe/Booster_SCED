@@ -1,0 +1,500 @@
+---
+title: "Baseline characteristics"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+# load data and packages
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+
+library(dplyr)
+#library(skimr)
+library(readxl)
+library(tidyr)
+library(openxlsx)
+library(writexl) 
+#library(readxl)
+library(stringr) # str replace all
+ 
+DataDir<-""
+OutDir<-""
+KlikDir<-""
+
+# load meta data
+meta<- read.csv(paste0(DataDir, "2026-03-17_MetaData_participants.csv"), sep = ";")
+
+# load seclected klik participants 
+klik<-read.xlsx(paste0(KlikDir, "2026-01-19_export_KLIK_Booster.xlsx"))
+
+```
+
+
+# clean data  (meta and klik)
+```{r}
+## dates meta ------
+meta$Diag_date<-as.Date(meta$Date.diagnosis.Chronic.disease,  format = "%d-%m-%Y")
+meta$T0_PreMeet_date<-as.Date(meta$Opstart,  format = "%d-%m-%Y") #T0
+meta$T3_Evaluatiegesprek_date<-as.Date(meta$Evaluatiegesprek,  format = "%d-%m-%Y") #T3
+# disease duration
+meta$Disease_duration<-as.numeric(meta$T0_PreMeet_date- meta$Diag_date)
+meta$Disease_duration<-round(meta$Disease_duration/365, 2)
+
+## dates  -----
+klik$Date_klik<-as.Date(klik$InvulDatum,  format = "%d-%m-%Y")
+date<-meta[,c("Studienummer", "KLIK", "T0_PreMeet_date", "T3_Evaluatiegesprek_date")]
+klik<-merge(date, klik, by.x="KLIK", by.y = "PatientID", all.y = T)
+
+klik$T0_daysbefore<-as.numeric(klik$T0_PreMeet_date- klik$Date_klik) # if pos: klik before start study, if negative: klik after start study
+klik$T3_daysafter<-as.numeric(klik$Date_klik- klik$T3_Evaluatiegesprek_date) # if pos: klik after  study, if negative: klik before end  study
+
+
+# rename variables because some are too long for exporting  
+## Create character vectors to specify which substrings you want to find and replace
+substring_to_find <- c("baseline", "extended", "algemeen", "kind", "ouders", "proactive", "-", "self_veerkracht", "self_covid_ouder", "self_covid_k")
+substring_to_replace <- c("bsl", "ext", "alg", "k", "o", "pro", "_", "k_veerkracht", "o_covid", "k_covid")
+colnames(klik) <- str_replace_all(colnames(klik), setNames(substring_to_replace, substring_to_find))
+
+```
+
+# difference with drop-out/ exclusion
+```{r}
+meta$Completed<-if_else(is.na(meta$Completed), 0,meta$Completed )
+meta <- meta %>%
+  mutate(
+    Completed = factor(Completed, levels = c(0, 1),
+                       labels = c("Non-completed", "Completed"))
+  )
+
+```
+
+```{r}
+
+# ---- AGE ----
+age_tab <- meta %>%
+  group_by(Completed) %>%
+  summarise(
+    value = paste0(
+      median(leeftijd_start, na.rm = TRUE), " [",
+      quantile(leeftijd_start, 0.25, na.rm = TRUE), ", ",
+      quantile(leeftijd_start, 0.75, na.rm = TRUE), "]"
+    ),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = Completed, values_from = value) %>%
+  mutate(
+    Variable = "Age, median [Q1, Q3]",
+    Level = ""
+  )
+
+age_p <- wilcox.test(leeftijd_start ~ Completed, data = meta)$p.value
+
+# ---- SEX ----
+sex_tab <- meta %>%
+  group_by(Completed, Geslacht) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Completed) %>%
+  mutate(pct = round(100 * n / sum(n), 1),
+         value = paste0(n, " (", pct, "%)")) %>%
+  select(-n, -pct) %>%
+  pivot_wider(names_from = Completed, values_from = value)
+
+sex_p <- fisher.test(table(meta$Geslacht, meta$Completed))$p.value
+
+# ---- EDUCATION ----
+edu_tab <- meta %>%
+  group_by(Completed, Education_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Completed) %>%
+  mutate(pct = round(100 * n / sum(n), 1),
+         value = paste0(n, " (", pct, "%)")) %>%
+  select(-n, -pct) %>%
+  pivot_wider(names_from = Completed, values_from = value)
+
+edu_p <- fisher.test(table(meta$Education_type, meta$Completed))$p.value
+
+# ---- COMBINE TABLE ----
+final_table <- bind_rows(
+  age_tab %>%
+    mutate(
+      Level = as.character(Level),
+      p = round(age_p, 3)
+    ),
+
+  sex_tab %>%
+    rename(Level = Geslacht) %>%
+    mutate(
+      Level = as.character(Level),
+      Variable = "Sex",
+      p = round(sex_p, 3)
+    ),
+
+  edu_tab %>%
+    rename(Level = Education_type) %>%
+    mutate(
+      Level = as.character(Level),
+      Variable = "Education",
+      p = round(edu_p, 3)
+    )
+) %>%
+  select(Variable, Level, "Non-completed", Completed, p)
+
+final_table
+```
+
+# completers
+```{r}
+table(meta$Studienummer)
+met<-meta[meta$Completed==1,]
+table(met$Studienummer)
+```
+# CIS
+```{r}
+# CIS4 --------------------------------------
+cis<-klik[klik$Vragenlijst=="kind_proactive_cis4",]
+summary(cis$T3_daysafter)
+cis <- cis[, colSums(is.na(cis)) / nrow(cis) <= 0.5]
+
+# calculate the CIS sumscore 
+#reverse coding items k_pro_cis4_CIS_4_1, k_pro_cis4_CIS_4_2, k_pro_cis4_CIS_4_4
+cis <- cis %>% 
+  mutate(k_pro_cis4_CIS_4_1_recoded = recode(k_pro_cis4_CIS_4_1, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+cis <- cis %>% 
+  mutate(k_pro_cis4_CIS_4_2_recoded = recode(k_pro_cis4_CIS_4_2, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+cis <- cis %>% 
+  mutate(k_pro_cis4_CIS_4_4_recoded = recode(k_pro_cis4_CIS_4_4, '1'=7, '2'=6, '3'=5, '4'=4, '5'=3, '6'=2, '7'=1))
+
+#Calculate total score
+cis <- cis %>% mutate(k_CIS4_total = rowSums(across(c("k_pro_cis4_CIS_4_1_recoded", "k_pro_cis4_CIS_4_2_recoded", "k_pro_cis4_CIS_4_3", "k_pro_cis4_CIS_4_4_recoded"))))
+#Classify total score in group <20 geen vermoeidheid >= 20 wel vermoeidheid
+cis <- cis %>% mutate(k_CIS4_total_bin = case_when(k_CIS4_total < 20 ~ 'geen vermoeidheid',
+                                             k_CIS4_total >= 20 ~ 'wel vermoeidheid',
+                                                       TRUE ~ NA))
+cisT0<-cis[cis$T0_daysbefore < 90 & cis$T0_daysbefore> -14, ]
+cisT0<-cisT0 %>% select(Studienummer,Date_klik,T0_daysbefore, k_CIS4_total)
+names(cisT0)<-c("Studienummer","T0_Date_klik_CIS","T0_daysbefore_CIS", "T0_CIS4")
+```
+
+# FSE 
+```{r}
+# range: 7-28, higher is better
+fse<-klik[klik$Vragenlijst=="self_qvs_selfefficacy",]
+fse<-fse[ , colSums(is.na(fse))/ nrow(fse) <= 0.5]
+
+#machteloos = reverse coded
+fse <- fse %>% 
+  mutate(self_qvs_selfefficacy_machteloosheid_reverse = recode(self_qvs_selfefficacy_machteloosheid, '1'=4, '2'=3, '3'=2, '4'=1))
+
+# FSE7
+#Calculate total score
+fse <- fse %>% mutate(FSE7 = rowSums(across(c("self_qvs_selfefficacy_beinvloeden_moeheid", "self_qvs_selfefficacy_veranderen_moeheid", 
+                                              "self_qvs_selfefficacy_instelling_moeheid", "self_qvs_selfefficacy_positief_beinvloeden",
+                                              "self_qvs_selfefficacy_machteloosheid_reverse", "self_qvs_selfefficacy_controle_moeheid",
+                                              "self_qvs_selfefficacy_leren_beinvloeden"  ))))
+summary(fse$FSE7) # range 11 - 28
+
+fse_items <- c(
+  "self_qvs_selfefficacy_beinvloeden_moeheid",
+  "self_qvs_selfefficacy_veranderen_moeheid",
+  "self_qvs_selfefficacy_instelling_moeheid",
+  "self_qvs_selfefficacy_positief_beinvloeden",
+  "self_qvs_selfefficacy_machteloosheid_reverse",
+  "self_qvs_selfefficacy_controle_moeheid",
+  "self_qvs_selfefficacy_leren_beinvloeden"
+)
+cor_matrix <- cor(
+  fse[, fse_items],
+  use = "pairwise.complete.obs",
+  method = "pearson"
+)
+round(cor_matrix, 2)
+
+# select per timepoint
+fseT0<-fse[fse$T0_daysbefore < 90 & fse$T0_daysbefore> -30, ]
+fseT0<-fseT0 %>% select(Studienummer,Date_klik,T0_daysbefore, FSE7)
+names(fseT0)<-c("Studienummer","T0_Date_klik_FSE","T0_daysbefore_FSE", "T0_FSE7")
+
+```
+
+# RCADS ---------------------------------------------------------------------------------------------------------
+```{r}
+rcads<-klik[klik$Vragenlijst=="kind_proactive_rcads25",]
+rcads<-rcads[ , colSums(is.na(rcads))/nrow(rcads)<=0.5]
+table(rcads$Studienummer) # all 1 , for everyone 
+
+rcads <- rcads %>%
+  mutate(k_pro_rcad25_1_recoded = k_pro_rcads25_rcads_1 - 1,
+         k_pro_rcad25_2_recoded = k_pro_rcads25_rcads_2 - 1,
+         k_pro_rcad25_3_recoded = k_pro_rcads25_rcads_3 - 1,
+         k_pro_rcad25_4_recoded = k_pro_rcads25_rcads_4 - 1,
+         k_pro_rcad25_5_recoded = k_pro_rcads25_rcads_5 - 1,
+         k_pro_rcad25_6_recoded = k_pro_rcads25_rcads_6 - 1,
+         k_pro_rcad25_7_recoded = k_pro_rcads25_rcads_7 - 1,
+         k_pro_rcad25_8_recoded = k_pro_rcads25_rcads_8 - 1,
+         k_pro_rcad25_9_recoded = k_pro_rcads25_rcads_9 - 1,
+         k_pro_rcad25_10_recoded = k_pro_rcads25_rcads_10 - 1,
+         k_pro_rcad25_11_recoded = k_pro_rcads25_rcads_11 - 1,
+         k_pro_rcad25_12_recoded = k_pro_rcads25_rcads_12 - 1,
+         k_pro_rcad25_13_recoded = k_pro_rcads25_rcads_13 - 1,
+         k_pro_rcad25_14_recoded = k_pro_rcads25_rcads_14 - 1,
+         k_pro_rcad25_15_recoded = k_pro_rcads25_rcads_15 - 1,
+         k_pro_rcad25_16_recoded = k_pro_rcads25_rcads_16 - 1,
+         k_pro_rcad25_17_recoded = k_pro_rcads25_rcads_17 - 1,
+         k_pro_rcad25_18_recoded = k_pro_rcads25_rcads_18 - 1,
+         k_pro_rcad25_19_recoded = k_pro_rcads25_rcads_19 - 1,
+         k_pro_rcad25_20_recoded = k_pro_rcads25_rcads_20 - 1,
+         k_pro_rcad25_21_recoded = k_pro_rcads25_rcads_21 - 1,
+         k_pro_rcad25_22_recoded = k_pro_rcads25_rcads_22 - 1,
+         k_pro_rcad25_23_recoded = k_pro_rcads25_rcads_23 - 1,
+         k_pro_rcad25_24_recoded = k_pro_rcads25_rcads_24 - 1,
+         k_pro_rcad25_25_recoded = k_pro_rcads25_rcads_25 - 1)
+
+
+# MAJOR DEPRESSION 1,4,8, 10,13,15, 16,19,21, 24
+variables_r25NL_dep_raw <- c("k_pro_rcad25_1_recoded", "k_pro_rcad25_4_recoded", "k_pro_rcad25_8_recoded", "k_pro_rcad25_10_recoded", 
+                             "k_pro_rcad25_13_recoded", "k_pro_rcad25_15_recoded", "k_pro_rcad25_16_recoded", "k_pro_rcad25_19_recoded", "k_pro_rcad25_21_recoded", "k_pro_rcad25_24_recoded")
+rcads <- rcads %>%
+  rowwise() %>%
+  mutate(k_pro_rcads25_dep_raw = sum(c_across(all_of(variables_r25NL_dep_raw)), na.rm = TRUE))
+
+
+# TOTAL ANXIETY 2,3,5,6, 7,9,11, 12,14,17,18,20,22,23,25
+variables_r25NL_anx_raw <- c("k_pro_rcad25_2_recoded", "k_pro_rcad25_3_recoded", "k_pro_rcad25_5_recoded", "k_pro_rcad25_6_recoded", 
+                             "k_pro_rcad25_7_recoded", "k_pro_rcad25_9_recoded", "k_pro_rcad25_11_recoded", "k_pro_rcad25_12_recoded", "k_pro_rcad25_14_recoded", "k_pro_rcad25_17_recoded", "k_pro_rcad25_18_recoded", 
+                             "k_pro_rcad25_20_recoded", "k_pro_rcad25_22_recoded", "k_pro_rcad25_23_recoded", "k_pro_rcad25_25_recoded")
+rcads <- rcads %>%
+  rowwise() %>%
+  mutate(k_pro_rcads25_anxiety_raw_total = sum(c_across(all_of(variables_r25NL_anx_raw)), na.rm = TRUE))
+
+# make NA if one of items NA
+rcads <- rcads %>%
+  mutate(T0_rcads25_dep = ifelse(all(is.na(c_across(starts_with("k_pro_rcad25_"))[1:25])), NA, k_pro_rcads25_dep_raw))
+rcads <- rcads %>%
+  mutate(T0_rcads25_anxiety = ifelse(all(is.na(c_across(starts_with("k_pro_rcad25_"))[1:25])), NA, k_pro_rcads25_anxiety_raw_total))
+
+## Round off decimals to no decimals, change if you want more decimals
+rcads <- rcads %>%
+  mutate_at(vars(k_pro_rcads25_dep_raw:k_pro_rcads25_anxiety_raw_total), ~ round(., 0))
+
+## sumscore
+rcads$T0_rcads25_total<-rcads$T0_rcads25_anxiety + rcads$T0_rcads25_dep
+
+rcads<-rcads %>% select(Studienummer,Date_klik,T0_daysbefore, T0_rcads25_total, T0_rcads25_dep, T0_rcads25_anxiety)
+names(rcads)<-c("Studienummer","T0_Date_klik_rcads","T0_daysbefore_rcads","T0_rcads25_total", "T0_rcads25_dep", "T0_rcads25_anxiety")
+
+```
+
+# schoolparticipation ----------------------------------------------------------------------------------------------------------------------------
+```{r}
+school<-klik[klik$Vragenlijst=="kind_proactive_schoolparticipatie",]
+school<-school[ , colSums(is.na(school))/nrow(school)<=0.5]
+
+schoolT0<-school[school$T0_daysbefore < 90 & school$T0_daysbefore> -14, ]
+schoolT0<-schoolT0 %>% select(Studienummer,Date_klik,T0_daysbefore, k_pro_schoolparticipatie_schoolverzuim)
+names(schoolT0)<-c("Studienummer","T0_Date_klik_school","T0_daysbefore_school", "T0_school")
+```
+schoolT3<-school[school$T3_daysafter < 60 & school$T3_daysafter> -14, ]
+table(schoolT3$Studienummer) #  some missing (2) # B04 & B10 missing
+summary(schoolT3$T3_daysafter) # max 42 days , mean 15 days
+schoolT3<-schoolT3 %>% select(Studienummer,Date_klik,T3_daysafter, k_pro_schoolparticipatie_schoolverzuim)
+names(schoolT3)<-c("Studienummer","T3_Date_klik_school","T3_daysafter_school", "T3_school")
+
+#life satisfaction ----------------------------------------------------------------------------------------------------------------------------
+```{r}
+cant<- klik[klik$Vragenlijst=="self_nrs_cantril_ladder",]
+cant<-cant[ , colSums(is.na(cant))/nrow(cant)<=0.5]
+
+cantT0<-cant[cant$T0_daysbefore < 90 & cant$T0_daysbefore> -30, ]
+cantT0<-cantT0 %>% select(Studienummer,Date_klik,T0_daysbefore, self_nrs_cantril_ladder_leven)
+names(cantT0)<-c("Studienummer","T0_Date_klik_cant","T0_daysbefore_cant", "T0_lifesatisfaction")
+```
+
+# self-rated health ----------------------------------------------------------------------------------------------------------------------------
+```{r}
+# EQ 5D
+#table(klik$Vragenlijst)
+eq<- klik[klik$Vragenlijst=="self_eq5d_y",]
+eq<-eq[ , colSums(is.na(eq))/nrow(eq)<=0.5]
+
+#see; https://euroqol-domain.ams3.digitaloceanspaces.com/wp-content/uploads/2025/07/18154146/Netherlands-Y-3L-Roudijk-DCE-TTO-2022.txt
+#### Roudijk B, Sajjad A, Essers B, Lipman S, Stalmeier P, Finch AP. A Value Set for the EQ-5D-Y-3L in the Netherlands. Pharmacoeconomics. 2022;40(Suppl 2):193-203.
+
+eq <- eq %>%
+  mutate(
+    disut_mo = case_when(
+      self_eq5d_y_mobiliteit == 1 ~ 0,
+      self_eq5d_y_mobiliteit == 2 ~ 0.036,
+      self_eq5d_y_mobiliteit == 3 ~ 0.191
+    ),
+    disut_sc = case_when(
+      self_eq5d_y_zelfzorg == 1 ~ 0,
+      self_eq5d_y_zelfzorg == 2 ~ 0.028,
+      self_eq5d_y_zelfzorg == 3 ~ 0.139
+    ),
+    disut_ua = case_when(
+      self_eq5d_y_dagelijkse_activiteiten == 1 ~ 0,
+      self_eq5d_y_dagelijkse_activiteiten == 2 ~ 0.058,
+      self_eq5d_y_dagelijkse_activiteiten == 3 ~ 0.211
+    ),
+    disut_pd = case_when(
+      self_eq5d_y_pijn == 1 ~ 0,
+      self_eq5d_y_pijn == 2 ~ 0.111,
+      self_eq5d_y_pijn == 3 ~ 0.363
+    ),
+    disut_ad = case_when(
+      self_eq5d_y_angst == 1 ~ 0,
+      self_eq5d_y_angst == 2 ~ 0.096,
+      self_eq5d_y_angst == 3 ~ 0.314
+    ),
+    disut_total = disut_mo + disut_sc + disut_ua + disut_pd + disut_ad,
+    EQ_index = round(1 - disut_total, 3)
+  )
+
+eqT0<-eq[eq$T0_daysbefore < 90 & eq$T0_daysbefore> -30, ]
+eqT0<-eqT0 %>% select(Studienummer,Date_klik,T0_daysbefore, EQ_index, self_eq5d_y_vas)
+names(eqT0)<-c("Studienummer","T0_Date_klik_EQ","T0_daysbefore_EQ", "T0_EQ_index", "T0_eq5d_vas")
+
+eqT3<-eq[eq$T3_daysafter < 60 & eq$T3_daysafter> -14, ]
+eqT3<-eqT3 %>% select(Studienummer,Date_klik,T3_daysafter, EQ_index, self_eq5d_y_vas)
+names(eqT3)<-c("Studienummer","T3_Date_klik_EQ","T3_daysafter_EQ", "T3_EQ_index", "T3_eq5d_vas")
+```
+
+
+# merge data klik -----------------------------------------------------------------------------------------------------------------------
+```{r}
+merged <- cisT0 %>%
+#  full_join(cisT3,    by = "Studienummer") %>%
+  full_join(fseT0,    by = "Studienummer") %>%
+ # full_join(fseT3,    by = "Studienummer") %>%
+  full_join(schoolT0, by = "Studienummer") %>%
+  #full_join(schoolT3, by = "Studienummer") %>%
+  full_join(rcads,    by = "Studienummer")
+names(merged)
+
+table(klik$Vragenlijst) # not all cleaned and used 
+
+merged2<-eqT0  %>%
+ # full_join(eqT3,    by = "Studienummer") %>%
+  full_join(cantT0,    by = "Studienummer") #%>%
+  #full_join(cantT3,    by = "Studienummer")
+  
+  
+merge_tot<-merged %>%
+  full_join(merged2,    by = "Studienummer")
+
+```
+
+
+# Baselines (per participant)
+```{r}
+met<-merge(met, merge_tot, by="Studienummer", all.x = T)
+
+# selection to be shown per person
+met.sel<-met %>% select(Studienummer, leeftijd_start, Geslacht, Education_type, Disease_group, Disease_duration, Fatigue_duration, T0_CIS4,
+                        T0_school, T0_rcads25_total, T0_FSE7, T0_eq5d_vas , T0_lifesatisfaction)
+
+met.sel<-met.sel %>% rename(
+  Participant = Studienummer,
+  Age = leeftijd_start,
+  Sex =  Geslacht,
+  fatigue = T0_CIS4,
+  Schoolabsence = T0_school,
+  Anxiety_and_depression = T0_rcads25_total,
+  FSE = T0_FSE7,
+  Health = T0_eq5d_vas,
+  Life_satisfaction = T0_lifesatisfaction
+)
+
+met.sel$Sex<-as.factor(met.sel$Sex)
+levels(met.sel$Sex)<-c("Female", "Male")
+met.sel$Education_type<-as.factor(met.sel$Education_type)
+met.sel$Disease_group<-as.factor(met.sel$Disease_group)
+
+```
+
+# Baseline (avarage)
+```{r}
+str(met.sel)
+
+# Helper: continuous summary
+summ_cont <- function(x) {
+  sprintf("%.1f [%.1f–%.1f]",
+          median(x, na.rm = TRUE),
+          quantile(x, 0.25, na.rm = TRUE),
+          quantile(x, 0.75, na.rm = TRUE))
+}
+
+# Helper: categorical summary
+summ_cat <- function(x) {
+  tab <- table(x)
+  pct <- prop.table(tab) * 100
+  
+  data.frame(
+    label = paste0("  ", names(tab)),   # indent
+    value = sprintf("%d (%.1f%%)", tab, pct),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Main function
+create_table1 <- function(df) {
+  
+  res <- list()
+  
+  for (var in names(df)) {
+    
+    x <- df[[var]]
+    
+    # Skip ID-like columns if needed
+    if (var == "Participant") next
+    
+    # Continuous
+    if (is.numeric(x)) {
+      res[[var]] <- data.frame(
+        label = var,
+        value = summ_cont(x)
+      )
+    }
+    
+    # Categorical (factor or character)
+    else if (is.factor(x) || is.character(x)) {
+      
+      cat_rows <- summ_cat(x)
+      
+      res[[var]] <- rbind(
+        data.frame(label = var, value = ""),
+        cat_rows
+      )
+    }
+  }
+  
+  bind_rows(res)
+}
+
+# Run it
+table1 <- create_table1(met.sel)
+
+table1
+
+```
+
+# combine and save tables 
+```{r}
+
+# Create workbook and add sheets
+wb <- createWorkbook()
+
+addWorksheet(wb, "Table1")
+writeData(wb, "Table1", table1)
+
+addWorksheet(wb, "Participant_info")
+writeData(wb, "Participant_info", met.sel)
+
+# Save
+saveWorkbook(wb, file = paste0(OutDir, "2026-03-23_Table1.xlsx"), overwrite = TRUE)
+
+
+```
+
+
+

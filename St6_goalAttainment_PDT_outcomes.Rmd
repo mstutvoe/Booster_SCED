@@ -1,0 +1,413 @@
+---
+title: "RQ4: "
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+removed: B17, B21
+
+
+A)  Multi-level analysis:  the relation between self-reported goal attainment and changes in outcomes.
+change in approach: 
+mean compliance
+median compliance 
+
+compliance in measurement period
+
+
+B) Responders vs non-responders based on a significant difference in FSE with the PDT
+
+
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+
+library(dplyr)
+library(skimr)
+library(readxl)
+library(tidyr)
+library(openxlsx)
+library(data.table)
+library(readxl) # excel sheet
+
+DataDir<-""
+OutDir<-""
+
+
+# Terugblik data (imputed version)
+tb<-fread(
+  paste0(DataDir,"2026-04-01_TerugblikIMP_export_260331.csv"),
+  sep=";", 
+  fill=TRUE)
+tb<-as.data.frame(tb)
+
+# noncompleted
+tb<-tb[!tb$Studienummer %in% c("B17" ,"B21", "B23_original"),]
+table(tb$Studienummer)
+
+# load PDT results
+pdt <- read_excel(paste0(OutDir, "2026-04-03_Summary_ITSA_PDT.xlsx"), sheet = "PDT")
+#pdt<-pdt %>% select(Studienummer, effect_FSE, effect_Satisfaction, effect_Health)
+pdt<-pdt[!pdt$Studienummer=="B17" & !pdt$Studienummer=="B21",]
+
+```
+
+# A -------------------------------------------------------------------------------------------------------------------------
+# create the goal compliance var
+```{r}
+
+tb <- tb %>%
+  mutate(
+    goal_numeric = case_when(
+      goal_check_daily_string == "Het is een beetje gelukt" ~ 0.5,
+      goal_check_daily_string == "Ik heb mijn doel gehaald" ~ 1,
+      goal_check_daily_string == "Vandaag is het niet gelukt" ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+Experiment<-tb[tb$phase_FSE=="B",]
+# did not remove the values after the insight conversation, because these were also not removed for the PDT analyses
+
+# create goal variable
+goal<-Experiment %>%
+  group_by(Studienummer) %>%
+  summarise(
+    mean_goal = mean(goal_numeric, na.rm = TRUE),
+    median_goal = median(goal_numeric, na.rm = TRUE),
+    n_goal      = sum(!is.na(goal_numeric))  
+  )
+
+# create a compliance var (only important for the period until the evaluation converstaion)
+Exp<-Experiment[Experiment$sent_date<=Experiment$T3_Evaluatiegesprek_date,]
+comp<-Exp %>%
+  group_by(Studienummer) %>%
+  summarise(
+    tb_compliance = mean(!is.na(start))
+  )
+
+# merge all data
+goal<-merge(goal, comp, by="Studienummer")
+df<-merge(goal, pdt, by="Studienummer")
+
+```
+
+# linear model FSE
+```{r}
+# first approach ------------------------------------------------------------------------------
+fse1<-lm(effect_FSE ~ mean_goal,  data=df)
+summary(fse1)
+
+plot(df$effect_FSE, df$mean_goal)
+
+fse2<-lm(effect_FSE ~ mean_goal + tb_compliance,  data=df)
+summary(fse2)
+
+plot(df$effect_FSE, df$mean_goal)
+
+# linearity
+plot(fse2, which = 1)
+#normality of resid (QQ)
+plot(fse2, which = 2)
+# heterosced
+plot(fse2, which = 3)
+
+# clear outlier B10
+df_no10<-df[!df$Studienummer=="B10",]
+
+# exclude B10 -----------------------------------------------------------------------------------
+fse1.1<-lm(effect_FSE ~ mean_goal,  data=df_no10)
+summary(fse1.1)
+
+plot(df_no10$effect_FSE, df_no10$mean_goal)
+
+fse2.2<-lm(effect_FSE ~ mean_goal + tb_compliance,  data=df_no10)
+summary(fse2.2)
+
+# linearity
+plot(fse2.2, which = 1)
+#normality of resid (QQ)
+plot(fse2.2, which = 2)
+# heterosced
+plot(fse2.2, which = 3)
+
+# include baseline  ---------------------------------------------------------------------------------
+fse2.3<-lm(effect_FSE ~ mean_goal + mean_A_FSE,  data=df)
+summary(fse2.3)
+
+# linearity
+plot(fse2.3, which = 1)
+#normality of resid (QQ)
+plot(fse2.3, which = 2)
+# heterosced
+plot(fse2.3, which = 3)
+
+```
+# linear model health 
+```{r}
+plot(df$effect_Health, df$mean_goal)
+
+health1<-lm(effect_Health ~ mean_goal,  data=df)
+summary(health1)
+
+health2<-lm(effect_Health ~ mean_goal + mean_A_Health,  data=df)
+summary(health2)
+
+plot(df$effect_FSE, df$mean_goal)
+
+# linearity
+plot(health2, which = 1)
+#normality of resid (QQ)
+plot(health2, which = 2)
+# heterosced
+plot(health2, which = 3)
+
+
+```
+# linear model Satisfaction  
+```{r}
+plot(df$effect_Satisfaction, df$mean_goal)
+
+satis1<-lm(effect_Satisfaction ~ mean_goal,  data=df)
+summary(satis1)
+
+satis2<-lm(effect_Satisfaction ~ mean_goal + mean_A_Satisfaction,  data=df)
+summary(satis2)
+
+# linearity
+plot(satis2, which = 1)
+#normality of resid (QQ)
+plot(satis2, which = 2)
+# heterosced
+plot(satis2, which = 3)
+
+```
+# sp correlation
+```{r}
+# Run tests
+fse  <- cor.test(df$mean_goal, df$effect_FSE, method = "spearman")
+health <- cor.test(df$mean_goal, df$effect_Health, method = "spearman")
+sat <- cor.test(df$mean_goal, df$effect_Satisfaction, method = "spearman")
+
+# Create table
+results_sp <- data.frame(
+  Variable = c("effect_FSE", "effect_Health", "effect_Satisfaction"),
+  Spearman_rho = c(fse$estimate, health$estimate, sat$estimate),
+  p_value = c(fse$p.value, health$p.value, sat$p.value)
+)
+
+```
+
+
+# B 
+“describe and compare the (baseline) characteristics of responders vs non-responders based on a significant difference in FSE with the PDT 
+(e.g. baseline FSE and fatigue, duration of symptoms, school absence, and illness identity), 
+using the Mann–Whitney U test / Fisher’s Exact Test
+
+goal: for what patients is the intervention most suited 
+
+17 participants of whom 5 responders 
+
+potential predictors
+illustrating fatigue severity
+- fatigue severity baseline
+- duration fatigue
+- school absence 
+illustrating other characteristics
+- baseline FSE (outcome)
+- age
+- school level (binary)
+- illness idendity (but: 4 subscales..)
+sex... not easy to act upon
+
+# Load (BL) data
+```{r}
+# table 1 info to be loaded
+bl <- read_excel(paste0(OutDir, "2026-03-23_Table1.xlsx"), sheet = "Participant_info")
+
+# FSE responders 
+bl<- bl %>% mutate(
+  responder = if_else(
+    Participant %in% c("B04", "B07", "B10", "B15", "B16"), 1,0
+  )
+)
+
+```
+# run analyses
+```{r}
+library(rstatix) # wilcox
+wilcox_test(Fatigue_duration ~ responder, data = bl)
+wilcox_test(Schoolabsence ~ responder, data = bl)
+wilcox.test(Age ~ responder, data = bl)
+
+bl %>%
+  wilcox_test(Age ~ responder, exact = FALSE, ) %>%
+  add_significance()
+
+
+vars <- c("fatigue", "Fatigue_duration", 
+          "Schoolabsence", "FSE", "Age")
+
+
+mw_results <- lapply(vars, function(v) {
+  formula <- as.formula(paste(v, "~ responder"))
+  
+  test <- wilcox.test(formula, data = bl)
+  eff  <- wilcox_effsize(bl, formula = formula)
+  
+  data.frame(
+    variable = v,
+    W = test$statistic,
+    p = test$p.value,
+    effect_size = eff$effsize
+  )
+})
+
+mw_results <- do.call(rbind, mw_results)
+
+```
+
+```{r}
+vars <- c("fatigue", "Fatigue_duration", "Schoolabsence", "FSE", "Age")
+bl$responder<-as.factor(bl$responder)
+
+mw_results <- lapply(vars, function(v) {
+  
+  # Check if both groups exist
+  sub_df <- bl %>% filter(!is.na(.data[[v]]))
+  
+  if(length(unique(sub_df$responder)) < 2) {
+    return(data.frame(
+      variable = v,
+      note = "Only one group present"
+    ))
+  }
+  
+  formula <- as.formula(paste(v, "~ responder"))
+  
+  # Test
+  test <- wilcox.test(formula, data = sub_df, exact = FALSE)
+  
+  # Effect size + CI
+  eff <- wilcox_effsize(sub_df, formula = formula)
+  
+  # Descriptives
+  desc <- sub_df %>%
+    group_by(responder) %>%
+    summarise(
+      median = median(.data[[v]], na.rm = TRUE),
+      q1 = quantile(.data[[v]], 0.25, na.rm = TRUE),
+      q3 = quantile(.data[[v]], 0.75, na.rm = TRUE),
+      min = min(.data[[v]], na.rm = TRUE),
+      max = max(.data[[v]], na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Ensure both groups exist
+  if(nrow(desc) < 2) {
+    return(data.frame(
+      variable = v,
+      note = "Only one group after filtering"
+    ))
+  }
+  
+  desc0 <- desc[desc$responder == 0, ]
+  desc1 <- desc[desc$responder == 1, ]
+  
+  data.frame(
+    variable = v,
+    
+    W = as.numeric(test$statistic),
+    p = test$p.value,
+    
+    effect_size = eff$effsize,
+    median_0 = desc0$median,
+    IQR_0 = paste0(round(desc0$q1,2), "–", round(desc0$q3,2)),
+    range_0 = paste0(desc0$min, "–", desc0$max),
+    
+    median_1 = desc1$median,
+    IQR_1 = paste0(round(desc1$q1,2), "–", round(desc1$q3,2)),
+    range_1 = paste0(desc1$min, "–", desc1$max)
+  )
+})
+
+mw_results <- bind_rows(mw_results)
+
+mw_results$effect_size<-round(mw_results$effect_size, 2)
+mw_results$p<-signif(mw_results$p, 2)
+
+```
+
+# test categorial vars 
+```{r}
+cat_vars <- c("Education_type", "Sex")
+
+fisher_results <- lapply(cat_vars, function(v) {
+  tab <- table(bl$responder, bl[[v]])
+  test <- fisher.test(tab)
+  
+  data.frame(
+    variable = v,
+    p = test$p.value
+  )
+})
+
+fisher_results <- do.call(rbind, fisher_results)
+```
+
+# correlation 
+```{r}
+
+all<-merge(df, bl, by.y = "Participant", by.x = "Studienummer")
+
+cor_results <- lapply(vars, function(v) {
+  test <- cor.test(all$effect_FSE, all[[v]], method = "spearman")
+  
+  data.frame(
+    variable = v,
+    rho = test$estimate,
+    p = test$p.value
+  )
+})
+
+cor_results <- do.call(rbind, cor_results)
+```
+
+
+# save output Rq4
+```{r}
+library(broom)
+
+
+models <- list(
+  fse = fse2.3,
+  health = health2,
+  satis = satis2
+)
+
+results_df <- bind_rows(
+  lapply(names(models), function(name) {
+    tidy(models[[name]]) %>%
+      mutate(model = name)
+  })
+)
+
+
+# Create a new workbook
+wb <- createWorkbook()
+
+addWorksheet(wb, "compliance_lm")
+writeData(wb, sheet = "compliance_lm", results_df)
+
+
+addWorksheet(wb, "compliance_sp")
+writeData(wb, sheet = "compliance_sp", results_sp)
+
+addWorksheet(wb, "respondents")
+writeData(wb, sheet = "respondents", mw_results)
+
+
+# Save the workbook
+saveWorkbook(wb, file = paste0(OutDir, "2026-04-08_RQ4.xlsx"), overwrite = TRUE)
+
+```
+

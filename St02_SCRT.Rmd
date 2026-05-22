@@ -1,0 +1,536 @@
+---
+title: "SCRT Booster"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+rm(list = ls(all = TRUE)) # Clear workspace
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(ggplot2)
+#install.packages("SCRT") 
+library(SCRT) # SCRT package
+library(data.table)
+
+DataDir<-""
+OutDir<-""
+
+# Terugblik data (imputed version)
+tb<-fread(
+  paste0(DataDir,"2026-04-01_TerugblikIMP_export_260331.csv"),
+  sep=";", 
+  fill=TRUE)
+tb<-as.data.frame(tb)
+``` 
+
+# cleaning data
+```{r}
+# make sure ordered in time
+tb %>%
+  group_by(Studienummer) %>%
+  summarise(is_sorted = all(diff(sent) >= 0))
+tb %>%
+  group_by(Studienummer) %>%
+  summarise(is_sorted = all(diff(time) >= 0))
+
+#remove data after evaluatiegesprek
+tb <- tb %>%
+  group_by(Studienummer) %>%
+  filter(as.Date(sent) <= T3_Evaluatiegesprek_date) %>%
+  ungroup()
+
+# remove B17 (excluded from study)
+tb<-tb[tb$Completed==1,]
+tb<-tb[!tb$Studienummer %in% c("B21", "B23_original")]
+
+tb$fse_imp<-round(tb$fse_imp,digits= 2)
+
+
+```
+
+# FSE: prepare df for test (df) ----------------------------------------------------------------------
+
+```{r}
+test<-tb[tb$Studienummer=="B23", c("sent_date", "start_date", "active", "time", "phase_FSE", "phase_cis4_school")]
+
+
+pad_to <- function(x, n) c(x, rep(NA, n - length(x)))
+max_n <- max(table(tb$Studienummer))
+
+# df with imputed FSE data
+fse_imp <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_FSE = pad_to(d$phase_FSE, max_n),
+    fse_imp   = pad_to(d$fse_imp,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_FSE"),
+                 paste0(d$Studienummer[1], "_fse_imp"))
+  df
+}))
+
+# save data
+write.table(
+  fse_imp,
+  file      = paste0(DataDir, "2026-04-01_FSEimputed_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+# df with missing FSE data
+fse_mis <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_FSE = pad_to(d$phase_FSE, max_n),
+    fse_orig   = pad_to(d$fse,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_FSE"),
+                 paste0(d$Studienummer[1], "_fse_orig"))
+  df
+}))
+
+# save data
+write.table(
+  fse_mis,
+  file      = paste0(DataDir, "2026-04_01_FSEoriginal_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+
+
+```
+
+#  FSE: prepare df for test (randomisation)
+the possible start points for each unit. 
+```{r}
+# load randomisation (possible starting points)
+rd<-fread(
+  paste0(DataDir,"2026-03-17_Randomisatie.csv"),
+  sep=";", 
+  fill=TRUE)
+rd<-as.data.frame(rd)
+
+# remove non participating participants
+rd<-rd[rd$Studienummer %in% tb$Studienummer,]
+``` 
+# Summary stats randomization   
+```{r}
+cat("participants included")
+rd$Studienummer
+cat("original randomization")
+summary(rd$random)
+cat("randomization devation")
+rd$random_AFW
+summary(rd$random_AFW)
+cat("randomization in practice")
+rd$Random_praktijk
+summary(rd$Random_praktijk)
+table(rd$Random_praktijk)
+cat("duration T0T1 (pre meet)")
+summary(rd$T0_T1)
+cat("duration T1T2 (meet)")
+summary(rd$T1_T2)
+cat("duration T0T2")
+summary(rd$T0_T2)
+cat("Time between end meet & conversation")
+rd$T0_T2-28-rd$T0_T1
+table(rd$Studienummer, (rd$T0_T2-28-rd$T0_T1))
+summary(rd$T0_T2-28-rd$T0_T1)
+```
+
+# clean randomization matrix & value matrix
+```{r}
+rd_fse<-rd[,9:17]
+
+write.table(
+  rd_fse,
+  file      = paste0(DataDir, "2026-04-01_RandomFSE.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+```
+
+
+# SCRT FSE (imp) 
+graph(design=”MBD”)
+quantity(design5”MBD”)    This returns the number of possible assignments, given the possible start points for each unit, as if there were no overlap, according to the formula of Koehler and Levin
+
+pvalue.random()       in case of a high number of possible assignments better to use the "monte Carlo" version
+pvalue.systematic()   no number, uses all
+
+arguments   
+data = read.table(file.choose(new = FALSE))
+
+design = "MBD"  
+statistic = “A-B”, “B-A”,or “|A-B|”.   
+  would say: dependent on outcome.   
+  increase is improvement: B-A  
+  decrease is improvemnet: A-B  
+    
+save        indicate whether the randomization distribution should be saved into a file (save=”yes”).  
+number    to specify the required number of randomizations
+limit       minumum number of obs per 
+
+starts        location of the file where the possible start points can be found.phase
+starts = file.choose(new = FALSE)
+
+package: "SCRT"
+example:    pvalue.random(design=”MBD”,statistic=”B-A”,save=”yes”,number=1000)
+
+# FSE -  SCRT
+```{r}
+# imputed data ------------
+# difference between the means of phase means
+obs_fse_imp<-observed(design="MBD",statistic="B-A", 
+       data = read.table(paste0(DataDir, "2026-04-01_FSEimputed_20260331.txt"))
+       )
+
+# p value 
+p_fse_imp<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04-01_FSEimputed_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_RandomFSE.txt")
+              )
+
+# original data ------------------
+obs_fse_orig<-observed(design="MBD",statistic="B-A", 
+       data = read.table(paste0(DataDir, "2026-04_01_FSEoriginal_20260331.txt"))
+       )
+
+# p value 
+p_fse_orig<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04_01_FSEoriginal_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_RandomFSE.txt")
+              )
+
+
+fse_summary <- tb %>%
+  group_by(Studienummer, phase_FSE) %>%
+  summarise(mean_fse = mean(fse, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_FSE,
+    values_from = mean_fse,
+    names_prefix = "mean_"
+  ) %>%
+  mutate(
+    diff_B_A = mean_B - mean_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+#fse_summary
+fse_summary_imp <- tb %>%
+  group_by(Studienummer, phase_FSE) %>%
+  summarise(mean_fse = mean(fse_imp, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_FSE,
+    values_from = mean_fse,
+    names_prefix = "mean_imp_"
+  ) %>%
+  mutate(
+    diff_imp_B_A = mean_imp_B - mean_imp_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+#fse_summary_imp
+fse_summary<-merge(fse_summary, fse_summary_imp, by="Studienummer")
+fse_summary$delta_means_kalman<-fse_summary$diff_B_A - fse_summary$diff_imp_B_A
+
+```
+
+
+# Satisfaction - df -------------------------------------------------------------------------------------------
+```{r}
+tb$satisfaction_imp<-round(tb$satisfaction_imp, 2)
+
+#pad_to <- function(x, n) c(x, rep(NA, n - length(x)))
+#max_n <- max(table(tb$Studienummer))
+
+# df with imputed satisfaction data
+satisfaction_imp <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_satisfaction = pad_to(d$phase_satisf_health, max_n),
+    satisfaction_imp   = pad_to(d$satisfaction_imp,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_satisfaction"),
+                 paste0(d$Studienummer[1], "_satisfaction_imp"))
+  df
+}))
+
+# save data
+write.table(
+  satisfaction_imp,
+  file      = paste0(DataDir, "2026-04-01_satisfaction-imputed_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+# df with missing satisfaction data
+satisfaction_mis <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_satisfaction = pad_to(d$phase_satisf_health, max_n),
+    satisfaction_orig   = pad_to(d$satisfaction,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_satisfaction"),
+                 paste0(d$Studienummer[1], "_satisfaction_orig"))
+  df
+}))
+
+# save data
+write.table(
+  satisfaction_mis,
+  file      = paste0(DataDir, "2026-04-01_satisfaction-original_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+```
+
+# Satisfaction - random
+phase_satisf_health = if_else(sent < T2_Inzichtsgesprek_date + weeks(6), "A", "B")
+```{r}
+rd_satisfaction<-rd[,9:17]
+rd_satisfaction<-rd_satisfaction + (6*7) # 6 weeks
+#test<-rd_satisfaction-rd_fse
+
+write.table(
+  rd_satisfaction,
+  file      = paste0(DataDir, "2026-04-01_Random_Satisf_Health.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+```
+
+# satisfaction - SCRT
+A - B because lower satisfaction is less fatigue 
+```{r}
+# imputed data ------------
+# difference between the means of phase means
+obs_satisfaction_imp<-observed(design="MBD",statistic="B-A",
+       data = read.table(paste0(DataDir, "2026-04-01_satisfaction-imputed_20260331.txt"))
+       )
+
+# p value 
+p_satisfaction_imp<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04-01_satisfaction-imputed_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_Random_Satisf_Health.txt")
+              )
+
+# original data ------------------
+obs_satisfaction_orig<-observed(design="MBD",statistic="B-A", 
+       data = read.table(paste0(DataDir, "2026-04-01_satisfaction-original_20260331.txt"))
+       )
+
+# p value 
+p_satisfaction_orig<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04-01_satisfaction-original_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_Random_Satisf_Health.txt")
+              )
+
+# background summary
+satisfaction_summary <- tb %>%
+  group_by(Studienummer, phase_satisf_health) %>%
+  summarise(mean_satisfaction = mean(satisfaction, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_satisf_health,
+    values_from = mean_satisfaction,
+    names_prefix = "mean_"
+  ) %>%
+  mutate(
+    diff_B_A = mean_B - mean_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+satisfaction_summary_imp <- tb %>%
+  group_by(Studienummer, phase_satisf_health) %>%
+  summarise(mean_satisfaction = mean(satisfaction_imp, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_satisf_health,
+    values_from = mean_satisfaction,
+    names_prefix = "mean_imp_"
+  ) %>%
+  mutate(
+    diff_imp_B_A = mean_imp_B - mean_imp_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+satisfaction_summary<-merge(satisfaction_summary, satisfaction_summary_imp, by="Studienummer")
+satisfaction_summary$delta_means_kalman<-satisfaction_summary$diff_B_A - satisfaction_summary$diff_imp_B_A
+
+```
+
+# Health - df --------------------------------------------------------------------------
+```{r}
+tb$health_imp<-round(tb$health_imp, 2)
+
+#pad_to <- function(x, n) c(x, rep(NA, n - length(x)))
+#max_n <- max(table(tb$Studienummer))
+
+# df with imputed health data
+health_imp <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_health = pad_to(d$phase_satisf_health, max_n),
+    health_imp   = pad_to(d$health_imp,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_health"),
+                 paste0(d$Studienummer[1], "_health_imp"))
+  df
+}))
+
+# save data
+write.table(
+  health_imp,
+  file      = paste0(DataDir, "2026-04-01_health-imputed_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+# df with missing health data
+health_mis <- do.call(cbind, lapply(split(tb, tb$Studienummer), function(d) {
+  df <- data.frame(
+    phase_health = pad_to(d$phase_satisf_health, max_n),
+    health_orig   = pad_to(d$health,   max_n)
+  )
+  names(df) <- c(paste0(d$Studienummer[1], "_phase_health"),
+                 paste0(d$Studienummer[1], "_health_orig"))
+  df
+}))
+
+# save data
+write.table(
+  health_mis,
+  file      = paste0(DataDir, "2026-04-01_health-original_20260331.txt"),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  eol       = "\n"
+)
+
+```
+
+# health - random
+phase_satisf_health = if_else(sent < T2_Inzichtsgesprek_date + weeks(6), "A", "B")
+already made for satisfaction!
+
+# health - SCRT
+```{r}
+# imputed data ------------
+# difference between the means of phase means
+obs_health_imp<-observed(design="MBD",statistic="B-A",
+       data = read.table(paste0(DataDir, "2026-04-01_health-imputed_20260331.txt"))
+       )
+
+# p value 
+p_health_imp<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04-01_health-imputed_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_Random_Satisf_Health.txt")
+              )
+
+# original data ------------------
+obs_health_orig<-observed(design="MBD",statistic="B-A", 
+       data = read.table(paste0(DataDir, "2026-04-01_health-original_20260331.txt"))
+       )
+
+# p value 
+p_health_orig<-pvalue.random(design="MBD",statistic="B-A",
+              save="no",number=1000,
+              data = read.table(paste0(DataDir, "2026-04-01_health-original_20260331.txt")),
+              starts = paste0(DataDir, "2026-04-01_Random_Satisf_Health.txt")
+              )
+
+# background summary
+health_summary <- tb %>%
+  group_by(Studienummer, phase_satisf_health) %>%
+  summarise(mean_health = mean(health, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_satisf_health,
+    values_from = mean_health,
+    names_prefix = "mean_"
+  ) %>%
+  mutate(
+    diff_B_A = mean_B - mean_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+health_summary_imp <- tb %>%
+  group_by(Studienummer, phase_satisf_health) %>%
+  summarise(mean_health = mean(health_imp, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = phase_satisf_health,
+    values_from = mean_health,
+    names_prefix = "mean_imp_"
+  ) %>%
+  mutate(
+    diff_imp_B_A = mean_imp_B - mean_imp_A,
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+health_summary<-merge(health_summary, health_summary_imp, by="Studienummer")
+health_summary$delta_means_kalman<-health_summary$diff_B_A - health_summary$diff_imp_B_A
+
+```
+
+# save SCRT output 
+```{r}
+library(openxlsx)
+
+# Create output dataframe
+output <- data.frame(
+  Outcome = c("FSE", #"CIS4", 
+              "Satisfaction", "health"),
+  TS_imp  = c(obs_fse_imp,         # obs_cis_imp,          
+              obs_satisfaction_imp,          obs_health_imp),
+  p_imp   = c(p_fse_imp,           # p_cis_imp,            
+              p_satisfaction_imp,            p_health_imp),
+  TS_orig = c(obs_fse_orig,        # obs_cis_orig,         
+              obs_satisfaction_orig,         obs_health_orig),
+  p_orig  = c(p_fse_orig,         #  p_cis_orig,           
+              p_satisfaction_orig,           p_health_orig)
+)
+
+# Create workbook and add sheets
+wb <- createWorkbook()
+
+addWorksheet(wb, "SCRT_test")
+writeData(wb, "SCRT_test", output)
+
+addWorksheet(wb, "fse_summary")
+writeData(wb, "fse_summary", fse_summary)
+
+#addWorksheet(wb, "cis_summary")
+#writeData(wb, "cis_summary", cis_summary)
+
+addWorksheet(wb, "satisfaction_summary")
+writeData(wb, "satisfaction_summary", satisfaction_summary)
+
+addWorksheet(wb, "health_summary")
+writeData(wb, "health_summary", health_summary)
+
+# Save
+saveWorkbook(wb, file = paste0(OutDir, "2026-04-01_SCRT_results.xlsx"), overwrite = TRUE)
+
+```
+
+
+
